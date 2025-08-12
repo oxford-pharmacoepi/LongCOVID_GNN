@@ -7,7 +7,17 @@ Drug repurposing—finding new therapeutic uses for existing drugs—is a promis
 + Lack of standardized benchmarks
 + Data leakage between training and test sets
 + Imbalanced learning scenarios due to sparse negative samples
+
 The framework supports retrospective validation using time-stamped versions of the Open Targets dataset, enabling realistic evaluation of model generalization to newly reported drug–disease associations.
+
+
+## This GitHub repository provides:
+
++ Scripts to construct biomedical knowledge graphs from Open Targets data
++ Preprocessed datasets for training, validation, and testing
++ Implementations of GNN models: GCNConv, GraphSAGE, and TransformerConv
++ Benchmarking pipeline with ablation studies and negative sampling strategies
++ Evaluation metrics including AUC, precision-recall curves, and more
 
 ## Project Structure
 
