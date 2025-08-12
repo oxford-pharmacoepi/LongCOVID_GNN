@@ -1,10 +1,13 @@
-# Drug-Disease Prediction Pipeline
+# Benchmarking Graph Neural Networks for Drug Repurposing
 
-A machine learning pipeline for predicting drug-disease associations using Graph Neural Networks (GNNs). Implements GCN, GraphSAGE, and Graph Transformer models.
+This repository accompanies the project "Benchmarking Graph Neural Network Algorithms for Drug Repurposing". It introduces a FAIR-compliant benchmarking framework for evaluating Graph Neural Network (GNN) architectures in the context of drug repurposing, using the Open Targets dataset.
 
-Identifiers:
+Drug repurposing—finding new therapeutic uses for existing drugs—is a promising strategy to accelerate drug development. The paper presents a systematic approach to evaluate GNN models on drug–disease association prediction tasks using knowledge graphs (KGs) constructed from Open Targets data. It addresses key challenges such as:
 
-
++ Lack of standardized benchmarks
++ Data leakage between training and test sets
++ Imbalanced learning scenarios due to sparse negative samples
+The framework supports retrospective validation using time-stamped versions of the Open Targets dataset, enabling realistic evaluation of model generalization to newly reported drug–disease associations.
 
 ## Project Structure
 
