@@ -1,7 +1,6 @@
 """
 Testing and Evaluation Module for Drug-Disease Prediction
 This module handles model testing, performance evaluation, visualization, and FP export for GNNExplainer.
-Integrates with the training pipeline from train_CI.py
 """
 
 import torch
@@ -1009,3 +1008,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
