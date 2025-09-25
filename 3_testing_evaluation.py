@@ -24,8 +24,9 @@ import platform
 import random
 from scipy import stats
 
-# Import model classes from train_CI.py
-from train_CI import GCNModel, TransformerModel, SAGEModel, set_seed, enable_full_reproducibility
+from src.models import GCNModel, TransformerModel, SAGEModel
+from src.utils import set_seed, enable_full_reproducibility, calculate_bootstrap_ci
+from src.config import get_config
 
 class ModelEvaluator:
     """Class for comprehensive model evaluation and testing with GNNExplainer integration."""
@@ -1008,4 +1009,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
