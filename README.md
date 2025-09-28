@@ -40,7 +40,6 @@ drug_disease_prediction/
 ├── config_example.json           # Example configuration file
 ├── README.md                     # This file
 └── data/                         # Data directory (create this)
-    ├── raw/                      # Raw OpenTargets data
     └── processed/                # Processed data files
 ```
 
