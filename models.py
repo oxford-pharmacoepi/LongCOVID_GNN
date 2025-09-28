@@ -1,0 +1,146 @@
+"""
+Shared model definitions for drug-disease prediction.
+All GNN model architectures used across the pipeline.
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.nn import GCNConv, TransformerConv, SAGEConv
+
+
+class GCNModel(torch.nn.Module):
+    """Graph Convolutional Network model."""
+    
+    def __init__(self, in_channels, hidden_channels, out_channels, num_layers=2, dropout_rate=0.5):
+        super(GCNModel, self).__init__()
+        self.num_layers = num_layers
+
+        # Initial GCNConv layer
+        self.conv1 = GCNConv(in_channels, hidden_channels)
+
+        # Additional GCNConv layers
+        self.conv_list = torch.nn.ModuleList(
+            [GCNConv(hidden_channels, hidden_channels) for _ in range(num_layers - 1)]
+        )
+
+        # Layer normalization and dropout
+        self.ln = torch.nn.LayerNorm(hidden_channels)
+        self.dropout = torch.nn.Dropout(p=dropout_rate)
+
+        # Final output layer
+        self.final_layer = torch.nn.Linear(hidden_channels, out_channels)
+
+    def forward(self, x, edge_index):
+        # First GCNConv layer
+        x = self.conv1(x, edge_index)
+        x = self.ln(x)
+        x = F.relu(x)
+        x = self.dropout(x)
+
+        # Additional GCNConv layers
+        for k in range(self.num_layers - 1):
+            x = self.conv_list[k](x, edge_index)
+            x = self.ln(x)
+            if k < self.num_layers - 2:  # Apply activation and dropout except on the last hidden layer
+                x = F.relu(x)
+                x = self.dropout(x)
+
+        # Final layer to produce output
+        x = self.final_layer(x)
+        return x
+
+
+class TransformerModel(torch.nn.Module):
+    """Graph Transformer model."""
+    
+    def __init__(self, in_channels, hidden_channels, out_channels, num_layers=2, dropout_rate=0.5):
+        super(TransformerModel, self).__init__()
+        self.num_layers = num_layers
+
+        # Initial TransformerConv layer with concat=False
+        self.conv1 = TransformerConv(in_channels, hidden_channels, heads=4, concat=False)
+
+        # Additional TransformerConv layers
+        self.conv_list = torch.nn.ModuleList(
+            [TransformerConv(hidden_channels, hidden_channels, heads=4, concat=False) for _ in range(num_layers - 1)]
+        )
+
+        # Layer normalization and dropout
+        self.ln = torch.nn.LayerNorm(hidden_channels)
+        self.dropout = torch.nn.Dropout(p=dropout_rate)
+
+        # Final output layer
+        self.final_layer = torch.nn.Linear(hidden_channels, out_channels)
+
+    def forward(self, x, edge_index):
+        # First TransformerConv layer
+        x = self.conv1(x, edge_index)
+        x = self.ln(x)
+        x = F.relu(x)
+        x = self.dropout(x)
+
+        # Additional TransformerConv layers
+        for k in range(self.num_layers - 1):
+            x = self.conv_list[k](x, edge_index)
+            x = self.ln(x)
+            if k < self.num_layers - 2:  # Apply activation and dropout except on the last hidden layer
+                x = F.relu(x)
+                x = self.dropout(x)
+
+        # Final layer to produce output
+        x = self.final_layer(x)
+        return x
+
+
+class SAGEModel(torch.nn.Module):
+    """GraphSAGE model."""
+    
+    def __init__(self, in_channels, hidden_channels, out_channels, num_layers=2, dropout_rate=0.5):
+        super(SAGEModel, self).__init__()
+        self.num_layers = num_layers
+
+        # Initial GraphSAGE layer
+        self.conv1 = SAGEConv(in_channels, hidden_channels)
+
+        # Additional hidden layers
+        self.conv_list = torch.nn.ModuleList(
+            [SAGEConv(hidden_channels, hidden_channels) for _ in range(num_layers - 1)]
+        )
+
+        # Layer normalization and dropout
+        self.ln = torch.nn.LayerNorm(hidden_channels)
+        self.dropout = torch.nn.Dropout(p=dropout_rate)
+
+        # Final output layer
+        self.final_layer = torch.nn.Linear(hidden_channels, out_channels)
+
+    def forward(self, x, edge_index):
+        # First layer
+        x = self.conv1(x, edge_index)
+        x = self.ln(x)
+        x = F.relu(x)
+        x = self.dropout(x)
+
+        # Additional layers
+        for k in range(self.num_layers - 1):
+            x = self.conv_list[k](x, edge_index)
+            x = self.ln(x)
+            if k < self.num_layers - 2:  # Apply activation and dropout except on the last hidden layer
+                x = F.relu(x)
+                x = self.dropout(x)
+
+        # Final layer to produce output
+        x = self.final_layer(x)
+        return x
+
+
+# Dictionary for easy model selection
+MODEL_CLASSES = {
+    'GCN': GCNModel,
+    'GCNModel': GCNModel,
+    'Transformer': TransformerModel,
+    'TransformerModel': TransformerModel,
+    'SAGE': SAGEModel,
+    'SAGEModel': SAGEModel,
+}
