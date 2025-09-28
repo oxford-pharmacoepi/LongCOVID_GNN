@@ -10,7 +10,6 @@ Drug repurposing—finding new therapeutic uses for existing drugs—is a promis
 
 The framework supports retrospective validation using time-stamped versions of the Open Targets dataset, enabling realistic evaluation of model generalization to newly reported drug–disease associations.
 
-
 ## This GitHub repository provides:
 
 + Scripts to construct biomedical knowledge graphs from Open Targets data
@@ -23,16 +22,26 @@ The framework supports retrospective validation using time-stamped versions of t
 
 ```
 drug_disease_prediction/
-├── 1_graph_creation.py          # Data loading and graph construction
-├── 2_training_validation.py     # Model training and validation
-├── 3_testing_evaluation.py      # Model testing and evaluation
-├── run_pipeline.py              # Main pipeline orchestrator
-├── requirements.txt             # Python dependencies
-├── README.md                    # This file
-├── config_example.json          # Example configuration file
-└── data/                        # Data directory (create this)
-    ├── raw/                     # Raw OpenTargets data
-    └── processed/               # Processed data files
+├── src/                           # Shared modules
+│   ├── __init__.py               # Package initialization
+│   ├── models.py                 # GNN model definitions (GCN, GraphSAGE, Transformer)
+│   ├── utils.py                  # Utility functions and evaluation metrics
+│   ├── config.py                 # Configuration management
+│   └── data_processing.py        # Data loading & preprocessing
+│
+├── scripts/                      # Main pipeline scripts
+│   ├── 1_create_graph.py         # Knowledge graph construction
+│   ├── 2_train_models.py         # Model training and validation
+│   ├── 3_test_evaluate.py        # Model testing and evaluation
+│   └── 4_explain_predictions.py  # GNN explanation analysis
+│
+├── run_pipeline.py               # Main pipeline orchestrator
+├── requirements.txt              # Python dependencies
+├── config_example.json           # Example configuration file
+├── README.md                     # This file
+└── data/                         # Data directory (create this)
+    ├── raw/                      # Raw OpenTargets data
+    └── processed/                # Processed data files
 ```
 
 ## Installation
@@ -163,7 +172,7 @@ Once the processing script completes:
 
 ```bash
 # The processed data is ready for graph creation
-python 1_graph_creation.py
+python scripts/1_create_graph.py
 
 # Or run the complete pipeline
 python run_pipeline.py
@@ -179,13 +188,16 @@ python run_pipeline.py
 ### Individual Steps
 ```bash
 # Step 1: Create graph (skip if using pre-processed data)
-python 1_graph_creation.py
+python scripts/1_create_graph.py
 
 # Step 2: Train models
-python 2_training_validation.py <graph_path> <results_path>
+python scripts/2_train_models.py <graph_path> <results_path>
 
 # Step 3: Evaluate models
-python 3_testing_evaluation.py <graph_path> <models_info_path> <results_path>
+python scripts/3_test_evaluate.py <graph_path> <models_info_path> <results_path>
+
+# Step 4: Explain predictions
+python scripts/4_explain_predictions.py <graph_path> <models_info_path> <results_path>
 ```
 
 ## Configuration
