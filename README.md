@@ -35,12 +35,11 @@ drug_disease_prediction/
 │   ├── 3_test_evaluate.py        # Model testing and evaluation
 │   └── 4_explain_predictions.py  # GNN explanation analysis
 │
+├── processed_data/               # Pre-processed data files
 ├── run_pipeline.py               # Main pipeline orchestrator
 ├── requirements.txt              # Python dependencies
-├── config_example.json           # Example configuration file
-├── README.md                     # This file
-└── data/                         # Data directory (create this)
-    └── processed/                # Processed data files
+├── config.json                   # Configuration file
+└── README.md                     # This file
 ```
 
 ## Installation
@@ -63,28 +62,85 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-## Data Preparation
+## Data Setup
 
-Choose one of the following options:
+**👥 Most users should choose Option 1** for the quickest setup. Only choose Option 2 if you need to work with raw OpenTargets data or want to understand the full data processing pipeline.
 
-### Option 1: Download Raw OpenTargets Data (Complete Setup)
+---
 
-Visit the OpenTargets downloads page to access the data: https://platform.opentargets.org/downloads/
+### 🚀 Option 1: Use Pre-processed Data (Recommended - Quick Start)
 
-#### Using FileZilla (Recommended)
+**Best for:** Getting started quickly, running experiments, most research use cases
+
+The repository includes pre-processed data files ready for immediate use. No additional downloads required!
+
+**What you get:**
+- Filtered and cleaned drug, disease, and gene datasets
+- Pre-built knowledge graph edges
+- Ready-to-use training/validation/test splits
+- Mapping files for all entities
+
+**Expected directory structure:**
+```
+processed_data/
+├── tables/
+│   ├── processed_molecules.csv     # Filtered drug molecules
+│   ├── processed_indications.csv   # Drug-disease indications
+│   ├── processed_diseases.csv      # Filtered diseases
+│   ├── processed_genes.csv         # Target genes
+│   └── processed_associations.csv  # Gene-disease associations
+├── mappings/
+│   ├── drug_key_mapping.json       # Drug ID to node index
+│   ├── drug_type_key_mapping.json  # Drug type mappings
+│   ├── gene_key_mapping.json       # Gene ID mappings
+│   ├── reactome_key_mapping.json   # Pathway mappings
+│   ├── disease_key_mapping.json    # Disease ID mappings
+│   ├── therapeutic_area_key_mapping.json # Therapeutic area mappings
+│   └── mapping_summary.json        # Node count summary
+└── edges/
+    ├── 1_molecule_drugType_edges.pt   # Drug-DrugType edges
+    ├── 2_molecule_disease_edges.pt    # Drug-Disease edges  
+    ├── 3_molecule_gene_edges.pt       # Drug-Gene edges
+    ├── 4_gene_reactome_edges.pt       # Gene-Pathway edges
+    ├── 5_disease_therapeutic_edges.pt # Disease-TherapeuticArea edges
+    ├── 6_disease_gene_edges.pt        # Disease-Gene edges
+    ├── edge_statistics.json           # Edge count summary
+    └── training_drug_disease_pairs.csv # Training pairs with names
+```
+
+**✅ You're ready to go!** Skip to the [Usage](#usage) section.
+
+---
+
+### 🔧 Option 2: Download Raw OpenTargets Data (Advanced)
+
+**Best for:** Custom data processing, understanding the full pipeline, working with different OpenTargets versions
+
+This option requires downloading large datasets from OpenTargets and involves more setup time.
+
+**Requirements:**
+- ~50GB+ free disk space
+- Stable internet connection for large downloads
+- FTP client or command line tools
+
+#### Access the Data
+
+Visit the OpenTargets downloads page: https://platform.opentargets.org/downloads/
+
+#### Method A: Using FileZilla (Recommended)
 1. **Host**: `ftp.ebi.ac.uk`
 2. **Remote site**: `/pub/databases/opentargets/platform/`
 3. **Navigate** to the version folders: `21.06`, `23.06`, or `24.06`
 4. **Go to**: `output/etl/parquet/` within each version
 5. **Download** the required datasets from each version
 
-#### Command Line Download
+#### Method B: Command Line Download
 ```bash
 # Create directory structure
-mkdir -p data/raw/{21.06,23.06,24.06}
+mkdir -p raw_data/{21.06,23.06,24.06}
 
 # Download using wget (example for 21.06)
-cd data/raw/21.06
+cd raw_data/21.06
 wget -r -np -nH --cut-dirs=7 https://ftp.ebi.ac.uk/pub/databases/opentargets/platform/21.06/output/etl/parquet/indication/
 wget -r -np -nH --cut-dirs=7 https://ftp.ebi.ac.uk/pub/databases/opentargets/platform/21.06/output/etl/parquet/molecule/
 wget -r -np -nH --cut-dirs=7 https://ftp.ebi.ac.uk/pub/databases/opentargets/platform/21.06/output/etl/parquet/disease/
@@ -114,7 +170,7 @@ From `/pub/databases/opentargets/platform/24.06/output/etl/parquet/`:
 
 #### Final Directory Structure:
 ```
-data/raw/
+raw_data/
 ├── 21.06/
 │   ├── indication/           
 │   ├── molecule/            
@@ -134,48 +190,9 @@ data/raw/
 - Large datasets may require significant download time and storage space
 - Check OpenTargets license terms before using the data
 
-### Option 2: Generate Pre-processed Data (Quick Start)
+After downloading, you'll need to update your `config.json` to point to the raw data directory and run the full processing pipeline.
 
-For a faster setup, you can directly use the processed files
-
-The data structure:
-```
-data/processed/  (or your configured processed_path)
-├── tables/
-│   ├── processed_molecules.csv     # Filtered drug molecules
-│   ├── processed_indications.csv   # Drug-disease indications
-│   ├── processed_diseases.csv      # Filtered diseases
-│   ├── processed_genes.csv         # Target genes
-│   └── processed_associations.csv  # Gene-disease associations
-├── mappings/
-│   ├── drug_key_mapping.json       # Drug ID to node index
-│   ├── drug_type_key_mapping.json  # Drug type mappings
-│   ├── gene_key_mapping.json       # Gene ID mappings
-│   ├── reactome_key_mapping.json   # Pathway mappings
-│   ├── disease_key_mapping.json    # Disease ID mappings
-│   ├── therapeutic_area_key_mapping.json # Therapeutic area mappings
-│   └── mapping_summary.json        # Node count summary
-└── edges/
-    ├── 1_molecule_drugType_edges.pt   # Drug-DrugType edges
-    ├── 2_molecule_disease_edges.pt    # Drug-Disease edges  
-    ├── 3_molecule_gene_edges.pt       # Drug-Gene edges
-    ├── 4_gene_reactome_edges.pt       # Gene-Pathway edges
-    ├── 5_disease_therapeutic_edges.pt # Disease-TherapeuticArea edges
-    ├── 6_disease_gene_edges.pt        # Disease-Gene edges
-    ├── edge_statistics.json           # Edge count summary
-    └── training_drug_disease_pairs.csv # Training pairs with names
-```
-
-#### Quick Start with Generated Data
-Once the processing script completes:
-
-```bash
-# The processed data is ready for graph creation
-python scripts/1_create_graph.py
-
-# Or run the complete pipeline
-python run_pipeline.py
-```
+---
 
 ## Usage
 
@@ -186,17 +203,17 @@ python run_pipeline.py
 
 ### Individual Steps
 ```bash
-# Step 1: Create graph (skip if using pre-processed data)
+# Step 1: Create graph from processed data
 python scripts/1_create_graph.py
 
 # Step 2: Train models
-python scripts/2_train_models.py <graph_path> <results_path>
+python scripts/2_train_models.py
 
 # Step 3: Evaluate models
-python scripts/3_test_evaluate.py <graph_path> <models_info_path> <results_path>
+python scripts/3_test_evaluate.py
 
 # Step 4: Explain predictions
-python scripts/4_explain_predictions.py <graph_path> <models_info_path> <results_path>
+python scripts/4_explain_predictions.py
 ```
 
 ## Configuration
@@ -210,8 +227,7 @@ Create a `config.json` file:
   "test_version": 24.06,
   "as_dataset": "associationByOverallDirect",
   "negative_sampling_approach": "random",
-  "general_path": "data/raw/",
-  "results_path": "results/"
+  "processed_path": "processed_data/"
 }
 ```
 
@@ -223,8 +239,10 @@ Create a `config.json` file:
 
 ## Output Files
 
+The pipeline generates various output files during execution:
+
 - `*_graph.pt` - Graph objects
-- `*_best_model.pt` - Trained models
+- `*_best_model.pt` - Trained models  
 - `test_results_summary.csv` - Performance metrics
 - `test_evaluation_report.txt` - Detailed results
 
