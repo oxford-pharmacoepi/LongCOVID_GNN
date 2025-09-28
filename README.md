@@ -1,8 +1,8 @@
-# Benchmarking Graph Neural Networks for Drug Repurposing
+# KG-Bench: Benchmarking Graph Neural Networks for Drug Repurposing
 
-This repository accompanies the project "Benchmarking Graph Neural Network Algorithms for Drug Repurposing". It introduces a FAIR-compliant benchmarking framework for evaluating Graph Neural Network (GNN) architectures in the context of drug repurposing, using the Open Targets dataset.
+This repository accompanies the project "KG-Bench: Benchmarking Graph Neural Network Algorithms for Drug Repurposing". It introduces KG-Bench, a FAIR-compliant benchmarking framework for evaluating Graph Neural Network (GNN) architectures in the context of drug repurposing, using the Open Targets dataset.
 
-Drug repurposing—finding new therapeutic uses for existing drugs—is a promising strategy to accelerate drug development. The paper presents a systematic approach to evaluate GNN models on drug–disease association prediction tasks using knowledge graphs (KGs) constructed from Open Targets data. It addresses key challenges such as:
+Drug repurposing—finding new therapeutic uses for existing drugs—is a promising strategy to accelerate drug development. KG-Bench presents a systematic approach to evaluate GNN models on drug–disease association prediction tasks using knowledge graphs (KGs) constructed from Open Targets data. The framework addresses key challenges such as:
 
 + Lack of standardized benchmarks
 + Data leakage between training and test sets
