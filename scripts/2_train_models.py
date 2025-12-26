@@ -184,9 +184,11 @@ class ModelTrainer:
         val_losses = []
         val_aucs = []
         
-        # Model save path
+        # Create models directory and set model save path
+        models_dir = os.path.join(results_path, 'models')
+        os.makedirs(models_dir, exist_ok=True)
         timestamp = dt.datetime.now().strftime("%Y%m%d%H%M%S")
-        model_path = os.path.join(results_path, f"{model_name}_best_model_{timestamp}.pt")
+        model_path = os.path.join(models_dir, f"{model_name}_best_model_{timestamp}.pt")
         
         print(f"Training for {self.model_config['num_epochs']} epochs with patience {self.model_config['patience']}")
         

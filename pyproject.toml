@@ -1,24 +1,40 @@
 [project]
-name = "benchmark-gnn-opentargets"
+name = "drug-repurposing"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = "==3.12.*"
 dependencies = [
+    "dotenv>=0.9.9",
+    "ipykernel>=7.0.1",
     "matplotlib>=3.10.7",
+    "mlflow>=3.5.1",
     "networkx>=3.5",
-    "numpy>=2.3.4",
+    "optuna>=4.5.0",
     "pandas>=2.3.3",
     "plotly>=6.5.0",
-    "polars>=1.35.2",
-    "pyarrow>=21.0.0",
+    "polars>=1.36.1",
     "scikit-learn>=1.7.2",
     "scipy>=1.16.2",
     "seaborn>=0.13.2",
     "torch>=2.2.2",
     "torch-geometric>=2.7.0",
-    "torch-scatter>=2.1.2",
-    "torch-sparse>=0.6.18",
-    "tqdm>=4.67.1",
-    "transformers>=4.57.1",
+]
+
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["src"]
+
+[tool.uv]
+required-environments = [
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'darwin' and platform_machine == 'x86_64'",
+]
+
+[tool.uv.workspace]
+members = [
+    "LongCOVID_GNN",
 ]

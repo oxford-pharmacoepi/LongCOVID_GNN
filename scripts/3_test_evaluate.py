@@ -24,6 +24,11 @@ from pathlib import Path
 import random
 import glob
 
+# Import from shared modules
+from src.models import GCNModel, TransformerModel, SAGEModel, MODEL_CLASSES
+from src.config import get_config
+from src.utils import enable_full_reproducibility, calculate_metrics
+from src.mlflow_tracker import ExperimentTracker
 
 def find_latest_graph(results_dir='results'):
     """Auto-detect the latest graph file."""
@@ -48,23 +53,24 @@ def find_latest_graph(results_dir='results'):
 
 def find_latest_models(results_dir='results'):
     """Auto-detect the latest trained models directory or files."""
-    # Look for individual model files
+    # Only look in the models subdirectory, not in results/ itself
     model_patterns = [
-        os.path.join(results_dir, '*_best_model_*.pt'),
         os.path.join(results_dir, 'models', '*_best_model_*.pt'),
-        '*_best_model_*.pt',
+        os.path.join(results_dir, 'models', '*.pt'),
     ]
     
     model_files = []
     for pattern in model_patterns:
-        model_files.extend(glob.glob(pattern))
+        found_files = glob.glob(pattern)
+        # Filter to exclude graph files
+        model_files.extend([f for f in found_files if 'graph' not in os.path.basename(f).lower()])
     
     if not model_files:
-        raise FileNotFoundError("No trained models found. Please train models first using script 2_train_models.py")
+        raise FileNotFoundError(f"No trained models found in {results_dir}/models/. Please train models first using script 2_train_models.py")
     
     # If multiple models found, return the directory containing the most recent one
     latest_model = max(model_files, key=os.path.getmtime)
-    models_dir = os.path.dirname(latest_model) or results_dir
+    models_dir = os.path.dirname(latest_model)
     print(f"Auto-detected models directory: {models_dir}")
     return models_dir
 
@@ -118,28 +124,34 @@ class ModelEvaluator:
             models_dir = models_path
             model_files = []
             for f in os.listdir(models_dir):
-                if f.endswith('_best_model.pt') or f.endswith('.pt'):
+                # Only look for files that contain 'model' in the name (not 'graph')
+                if f.endswith('.pt') and 'model' in f.lower() and 'graph' not in f.lower():
                     model_files.append(os.path.join(models_dir, f))
         
         print(f"Found model files: {[os.path.basename(f) for f in model_files]}")
+        
+        if not model_files:
+            print("Warning: No valid model files found (excluding graph files)")
+            return trained_models
         
         # Create model info dictionary
         for model_file in model_files:
             filename = os.path.basename(model_file)
             
-            if 'GCN' in filename:
+            if 'GCN' in filename or 'gcn' in filename:
                 model_name = 'GCNModel'
                 model_class = GCNModel
-            elif 'Transformer' in filename:
+            elif 'Transformer' in filename or 'transformer' in filename:
                 model_name = 'TransformerModel'
                 model_class = TransformerModel
-            elif 'SAGE' in filename:
+            elif 'SAGE' in filename or 'sage' in filename:
                 model_name = 'SAGEModel'
                 model_class = SAGEModel
             else:
-                # Try to extract model name from filename
-                model_name = filename.replace('_best_model.pt', '').replace('.pt', '')
-                model_class = TransformerModel  # Default
+                # Could not determine model type
+                print(f"Warning: Could not detect model type from filename: {filename}")
+                print("Skipping this file.")
+                continue
             
             trained_models[model_name] = {
                 'model_path': model_file,
