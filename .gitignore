@@ -145,6 +145,7 @@ cython_debug/
 data/raw/
 data/processed/
 !data/sample/
+processed_data/*
 
 # Results and outputs
 results/
