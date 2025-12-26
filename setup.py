@@ -64,7 +64,7 @@ setup(
             "jupyter>=1.0.0",
         ],
         "gpu": [
-            "torch>=2.0.0+cu118",
+            "torch>=2.0.0",
         ],
         "docs": [
             "sphinx>=5.0.0",
@@ -74,10 +74,10 @@ setup(
     entry_points={
         "console_scripts": [
             "drug-disease-pipeline=run_pipeline:main",
-            "create-graph=scripts.1_create_graph:main",
-            "train-models=scripts.2_train_models:main",
-            "test-evaluate=scripts.3_test_evaluate:main",
-            "explain-predictions=scripts.4_explain_predictions:main",
+            "drug-disease-create-graph=scripts.1_create_graph:main",
+            "drug-disease-train-models=scripts.2_train_models:main", 
+            "drug-disease-test-evaluate=scripts.3_test_evaluate:main",
+            "drug-disease-explain=scripts.4_explain_predictions:main",
         ],
     },
     include_package_data=True,

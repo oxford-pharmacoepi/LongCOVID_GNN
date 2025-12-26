@@ -222,10 +222,73 @@ def one_hot_encode(node_type, num_node_types):
     return feature_vector.unsqueeze(0)
 
 
-def randomize_tensor(tensor):
-    """Randomize tensor columns for shuffling edges."""
-    tensor = tensor[:, torch.randperm(tensor.size(1))]
-    return tensor
+def one_hot_encode_categorical(values_list, unique_values=None):
+    """
+    Create one-hot encoding for categorical values.
+    
+    Args:
+        values_list: List of categorical values
+        unique_values: Optional list of unique values for consistent encoding
+    
+    Returns:
+        Tensor of one-hot encoded features
+    """
+    if unique_values is None:
+        unique_values = sorted(list(set(values_list)))
+    
+    value_to_idx = {val: idx for idx, val in enumerate(unique_values)}
+    
+    encoded = []
+    for val in values_list:
+        one_hot = torch.zeros(len(unique_values))
+        if val in value_to_idx:
+            one_hot[value_to_idx[val]] = 1.0
+        encoded.append(one_hot)
+    
+    return torch.stack(encoded)
+
+
+def extract_biotype_features(gene_table, gene_list, gene_key_mapping, version=21.06):
+    """
+    Extract bioType features from gene table.
+    
+    Args:
+        gene_table: PyArrow table with gene data
+        gene_list: List of gene IDs
+        gene_key_mapping: Mapping from gene ID to index
+        version: OpenTargets version number
+    
+    Returns:
+        Tensor of one-hot encoded bioType features aligned to gene_list order
+    """
+    import pyarrow as pa
+    
+    # Get bioType column (name differs by version)
+    if version in [21.04, 21.06]:
+        biotype_col_name = 'bioType'
+    else:
+        biotype_col_name = 'biotype'
+    
+    # Extract gene IDs and bioTypes
+    gene_df = gene_table.select(['id', biotype_col_name]).to_pandas()
+    
+    # Create mapping from gene ID to bioType
+    gene_to_biotype = dict(zip(gene_df['id'], gene_df[biotype_col_name]))
+    
+    # Get unique bioTypes for consistent encoding
+    unique_biotypes = sorted(list(set(gene_to_biotype.values())))
+    biotype_to_idx = {bt: idx for idx, bt in enumerate(unique_biotypes)}
+    
+    # Create feature matrix aligned to gene_list order
+    biotype_features = []
+    for gene_id in gene_list:
+        biotype = gene_to_biotype.get(gene_id, 'unknown')
+        one_hot = torch.zeros(len(unique_biotypes))
+        if biotype in biotype_to_idx:
+            one_hot[biotype_to_idx[biotype]] = 1.0
+        biotype_features.append(one_hot)
+    
+    return torch.stack(biotype_features)
 
 
 # Evaluation and Statistical Functions

@@ -1,280 +1,190 @@
 #!/usr/bin/env python3
 """
-Complete Pipeline Runner for Drug-Disease Prediction
-Runs the full modular pipeline: Graph -> Train -> Test -> Explain
+Complete Pipeline Runner for Drug-Disease Prediction with GNNs
+Runs all steps: graph creation, model training, testing, and explanation.
+Uses config.py for all configuration settings.
 """
 
-import argparse
 import subprocess
 import sys
 import os
-import json
 from pathlib import Path
+import argparse
 import datetime as dt
 
-def run_command(cmd, description):
-    """Run a command and handle errors."""
+from src.config import get_config
+
+
+def run_command(command, description):
+    """Run a shell command with error handling."""
     print(f"\n{'='*60}")
     print(f"STEP: {description}")
-    print(f"Command: {' '.join(cmd)}")
-    print('='*60)
+    print(f"{'='*60}")
+    print(f"Command: {' '.join(command)}")
     
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    
-    if result.returncode != 0:
-        print(f"❌ ERROR in {description}")
-        print("STDOUT:", result.stdout)
-        print("STDERR:", result.stderr)
-        return False
-    else:
-        print(f"✅ SUCCESS: {description}")
-        if result.stdout:
-            print("Output:", result.stdout[-500:])  # Last 500 chars
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        print(result.stdout)
+        if result.stderr:
+            print("Warnings/Errors:", result.stderr)
+        print(f"✓ {description} completed successfully")
         return True
+    except subprocess.CalledProcessError as e:
+        print(f"✗ Error in {description}")
+        print(f"Return code: {e.returncode}")
+        print(f"Output: {e.stdout}")
+        print(f"Error: {e.stderr}")
+        return False
 
-def run_complete_pipeline(config_path=None, results_dir="results"):
-    """Run the complete drug-disease prediction pipeline."""
-    
-    print("🚀 STARTING COMPLETE DRUG-DISEASE PREDICTION PIPELINE")
-    print("="*70)
-    
-    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = f"{results_dir}/pipeline_run_{timestamp}"
-    
-    # Ensure results directory exists
-    os.makedirs(results_dir, exist_ok=True)
-    
-    # Step 1: Create Graph
-    graph_cmd = [sys.executable, "scripts/1_create_graph.py", "--output-dir", results_dir]
-    if config_path:
-        graph_cmd.extend(["--config", config_path])
-    
-    if not run_command(graph_cmd, "Graph Creation"):
-        return False
-    
-    # Find the created graph file
-    graph_files = list(Path(results_dir).glob("graph_*.pt"))
-    if not graph_files:
-        print("❌ ERROR: No graph file found after creation")
-        return False
-    
-    graph_path = str(graph_files[0])
-    print(f"📊 Using graph: {graph_path}")
-    
-    # Step 2: Train Models
-    models_dir = f"{results_dir}/models"
-    train_cmd = [sys.executable, "scripts/2_train_models.py", graph_path, 
-                "--results-path", models_dir]
-    if config_path:
-        train_cmd.extend(["--config", config_path])
-    
-    if not run_command(train_cmd, "Model Training"):
-        return False
-    
-    # Step 3: Test and Evaluate Models
-    test_cmd = [sys.executable, "scripts/3_test_evaluate.py", graph_path, models_dir,
-               "--results-path", results_dir, "--export-fp"]
-    if config_path:
-        test_cmd.extend(["--config", config_path])
-    
-    if not run_command(test_cmd, "Model Testing and Evaluation"):
-        return False
-    
-    # Step 4: Explain Predictions (for each model with FP predictions)
-    predictions_dir = Path(results_dir) / "predictions"
-    if predictions_dir.exists():
-        fp_files = list(predictions_dir.glob("*_FP_predictions_*.csv"))
-        
-        for fp_file in fp_files:
-            model_name = fp_file.name.split('_FP_predictions_')[0]
-            explainer_dir = f"{results_dir}/explainer/{model_name}"
-            
-            # Find corresponding model file
-            model_files = list(Path(models_dir).glob(f"*{model_name}*.pt"))
-            if model_files:
-                model_path = str(model_files[0])
-                
-                explain_cmd = [
-                    sys.executable, "scripts/4_explain_predictions.py",
-                    "--graph", graph_path,
-                    "--model", model_path, 
-                    "--predictions", str(fp_file),
-                    "--output-dir", explainer_dir
-                ]
-                if config_path:
-                    explain_cmd.extend(["--config", config_path])
-                
-                run_command(explain_cmd, f"GNN Explanation for {model_name}")
-    
-    print(f"\n🎉 PIPELINE COMPLETED SUCCESSFULLY!")
-    print(f"📁 All results saved to: {results_dir}")
-    print(f"⏰ Pipeline run timestamp: {timestamp}")
-    
-    return True
-
-def run_individual_step(step, graph_path=None, models_path=None, config_path=None, results_dir="results"):
-    """Run an individual pipeline step."""
-    
-    print(f"🔧 RUNNING INDIVIDUAL STEP: {step.upper()}")
-    print("="*50)
-    
-    if step == "graph":
-        cmd = [sys.executable, "scripts/1_create_graph.py", "--output-dir", results_dir]
-        if config_path:
-            cmd.extend(["--config", config_path])
-        
-        return run_command(cmd, "Graph Creation")
-    
-    elif step == "train":
-        if not graph_path:
-            print("❌ ERROR: Graph path required for training")
-            return False
-        
-        models_dir = f"{results_dir}/models"
-        cmd = [sys.executable, "scripts/2_train_models.py", graph_path, 
-               "--results-path", models_dir]
-        if config_path:
-            cmd.extend(["--config", config_path])
-        
-        return run_command(cmd, "Model Training")
-    
-    elif step == "test":
-        if not graph_path or not models_path:
-            print("❌ ERROR: Graph path and models path required for testing")
-            return False
-        
-        cmd = [sys.executable, "scripts/3_test_evaluate.py", graph_path, models_path,
-               "--results-path", results_dir, "--export-fp"]
-        if config_path:
-            cmd.extend(["--config", config_path])
-        
-        return run_command(cmd, "Model Testing")
-    
-    elif step == "explain":
-        print("❌ ERROR: Explain step requires specific model and predictions files")
-        print("Use the complete pipeline or run 4_explain_predictions.py directly")
-        return False
-    
-    else:
-        print(f"❌ ERROR: Unknown step '{step}'")
-        return False
 
 def main():
-    """Main function with argument parsing."""
-    parser = argparse.ArgumentParser(
-        description='Drug-Disease Prediction Pipeline Runner',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Run complete pipeline
-  python run_pipeline.py --complete
-  
-  # Run complete pipeline with custom config
-  python run_pipeline.py --complete --config config.json
-  
-  # Run individual steps
-  python run_pipeline.py --step graph
-  python run_pipeline.py --step train --graph results/graph_*.pt
-  python run_pipeline.py --step test --graph results/graph_*.pt --models results/models/
-        """
-    )
-    
-    # Main execution modes
-    parser.add_argument('--complete', action='store_true', 
-                       help='Run complete pipeline (graph -> train -> test -> explain)')
-    parser.add_argument('--step', choices=['graph', 'train', 'test', 'explain'],
-                       help='Run individual pipeline step')
-    
-    # Configuration
-    parser.add_argument('--config', type=str, help='Path to configuration JSON file')
-    parser.add_argument('--results-dir', type=str, default='results', 
-                       help='Base results directory')
-    
-    # Step-specific arguments
-    parser.add_argument('--graph', type=str, help='Path to graph file (for train/test steps)')
-    parser.add_argument('--models', type=str, help='Path to models directory (for test step)')
-    
-    # Utility flags
-    parser.add_argument('--check-env', action='store_true', 
-                       help='Check if environment is properly set up')
-    parser.add_argument('--dry-run', action='store_true',
-                       help='Show commands that would be run without executing')
+    parser = argparse.ArgumentParser(description='Run complete drug-disease prediction pipeline')
+    parser.add_argument('--version', type=str, default='21.06', 
+                       help='Data version (21.06, 23.06, 24.06)')
+    parser.add_argument('--use-raw', action='store_true', 
+                       help='Use raw data instead of processed')
+    parser.add_argument('--model', type=str, default='all',
+                       choices=['GCN', 'Transformer', 'SAGE', 'all'],
+                       help='Model to train')
+    parser.add_argument('--skip-graph', action='store_true',
+                       help='Skip graph creation (use existing graph)')
+    parser.add_argument('--skip-training', action='store_true',
+                       help='Skip model training (use existing models)')
+    parser.add_argument('--skip-testing', action='store_true',
+                       help='Skip model testing')
+    parser.add_argument('--skip-explanation', action='store_true',
+                       help='Skip GNN explanation generation')
+    # Removed --config argument - using config.py only
     
     args = parser.parse_args()
     
-    # Check environment if requested
-    if args.check_env:
-        print("🔍 CHECKING ENVIRONMENT")
-        print("="*30)
-        
-        # Check Python version
-        print(f"Python version: {sys.version}")
-        
-        # Check if scripts exist
-        scripts = ['1_create_graph.py', '2_train_models.py', '3_test_evaluate.py', '4_explain_predictions.py']
-        for script in scripts:
-            script_path = f"scripts/{script}"
-            if os.path.exists(script_path):
-                print(f"✅ Found: {script}")
-            else:
-                print(f"❌ Missing: {script}")
-        
-        # Check if src modules exist
-        src_modules = ['models.py', 'utils.py', 'config.py', 'data_processing.py']
-        for module in src_modules:
-            module_path = f"src/{module}"
-            if os.path.exists(module_path):
-                print(f"✅ Found: src/{module}")
-            else:
-                print(f"❌ Missing: src/{module}")
-        
-        # Try importing key dependencies
-        try:
-            import torch
-            print(f"✅ PyTorch: {torch.__version__}")
-        except ImportError:
-            print("❌ PyTorch not installed")
-        
-        try:
-            import torch_geometric
-            print(f"✅ PyTorch Geometric: {torch_geometric.__version__}")
-        except ImportError:
-            print("❌ PyTorch Geometric not installed")
-        
-        return
+    # Load configuration from config.py
+    config = get_config()
+    print("\n" + "="*60)
+    print("DRUG-DISEASE PREDICTION PIPELINE")
+    print("Using configuration from: src/config.py")
+    print("="*60)
     
-    # Validate arguments
-    if not args.complete and not args.step:
-        print("❌ ERROR: Must specify either --complete or --step")
-        parser.print_help()
-        return
+    # Setup paths
+    scripts_dir = Path(__file__).parent / "scripts"
+    results_dir = Path("results")
+    results_dir.mkdir(exist_ok=True)
     
-    if args.complete and args.step:
-        print("❌ ERROR: Cannot specify both --complete and --step")
-        return
+    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    data_type = "raw" if args.use_raw else "processed"
+    graph_filename = f"graph_{args.version}_{data_type}_{timestamp}.pt"
+    graph_path = results_dir / graph_filename
     
-    # Run pipeline
-    try:
-        if args.complete:
-            success = run_complete_pipeline(args.config, args.results_dir)
-        else:
-            success = run_individual_step(
-                args.step, args.graph, args.models, args.config, args.results_dir
-            )
+    # Step 1: Create Graph
+    if not args.skip_graph:
+        cmd = [
+            sys.executable,
+            str(scripts_dir / "1_create_graph.py"),
+            "--version", args.version,
+            "--output-path", str(results_dir)
+        ]
         
-        if success:
-            print("\n🎉 EXECUTION COMPLETED SUCCESSFULLY!")
-            sys.exit(0)
-        else:
-            print("\n💥 EXECUTION FAILED!")
-            sys.exit(1)
+        if args.use_raw:
+            cmd.append("--use-raw")
+        
+        if not run_command(cmd, "Graph Creation"):
+            print("\n✗ Pipeline failed at graph creation")
+            return 1
+    else:
+        # Find most recent graph file
+        graph_files = sorted(results_dir.glob(f"graph_{args.version}_{data_type}_*.pt"))
+        if not graph_files:
+            print(f"✗ No existing graph found matching pattern: graph_{args.version}_{data_type}_*.pt")
+            return 1
+        graph_path = graph_files[-1]
+        print(f"Using existing graph: {graph_path}")
+    
+    # Step 2: Train Models
+    if not args.skip_training:
+        cmd = [
+            sys.executable,
+            str(scripts_dir / "2_train_models.py"),
+            "--graph", str(graph_path),
+            "--model", args.model,
+            "--output-dir", str(results_dir)
+        ]
+        
+        if not run_command(cmd, f"Model Training ({args.model})"):
+            print("\n✗ Pipeline failed at model training")
+            return 1
+    
+    # Step 3: Test and Evaluate Models
+    if not args.skip_testing:
+        # Find trained models
+        models_dir = results_dir / "models"
+        if not models_dir.exists():
+            print("✗ No trained models found. Run training first.")
+            return 1
+        
+        model_files = list(models_dir.glob("*_best_model.pt"))
+        if not model_files:
+            print("✗ No model files found in results/models/")
+            return 1
+        
+        for model_file in model_files:
+            cmd = [
+                sys.executable,
+                str(scripts_dir / "3_test_evaluate.py"),
+                "--graph", str(graph_path),
+                "--model", str(model_file),
+                "--output-dir", str(results_dir)
+            ]
             
-    except KeyboardInterrupt:
-        print("\n⏹️  Pipeline interrupted by user")
-        sys.exit(1)
-    except Exception as e:
-        print(f"\n💥 UNEXPECTED ERROR: {e}")
-        sys.exit(1)
+            model_name = model_file.stem.replace("_best_model", "")
+            if not run_command(cmd, f"Testing {model_name}"):
+                print(f"\n⚠ Warning: Testing failed for {model_name}, continuing...")
+    
+    # Step 4: Generate Explanations
+    if not args.skip_explanation:
+        # Find FP predictions
+        predictions_dir = results_dir / "predictions"
+        if not predictions_dir.exists():
+            print("⚠ No predictions directory found. Skipping explanation generation.")
+        else:
+            fp_files = list(predictions_dir.glob("*_fp_predictions.csv"))
+            if not fp_files:
+                print("⚠ No FP prediction files found. Skipping explanation generation.")
+            else:
+                # Find corresponding model
+                for fp_file in fp_files:
+                    # Extract model name from FP file
+                    model_name = fp_file.stem.replace("_fp_predictions", "")
+                    model_file = models_dir / f"{model_name}_best_model.pt"
+                    
+                    if not model_file.exists():
+                        print(f"⚠ Model file not found for {model_name}, skipping explanation")
+                        continue
+                    
+                    cmd = [
+                        sys.executable,
+                        str(scripts_dir / "4_explain_predictions.py"),
+                        "--graph", str(graph_path),
+                        "--model", str(model_file),
+                        "--predictions", str(fp_file),
+                        "--output-dir", str(results_dir / "explainer"),
+                        "--mappings-dir", "processed_data/mappings"
+                    ]
+                    
+                    if not run_command(cmd, f"Generating Explanations for {model_name}"):
+                        print(f"\n⚠ Warning: Explanation generation failed for {model_name}, continuing...")
+    
+    print("\n" + "="*60)
+    print("✓ PIPELINE COMPLETED SUCCESSFULLY")
+    print("="*60)
+    print(f"Results saved to: {results_dir}")
+    print(f"Graph: {graph_path}")
+    print(f"Models: {results_dir / 'models'}")
+    print(f"Evaluations: {results_dir / 'evaluation'}")
+    print(f"Predictions: {results_dir / 'predictions'}")
+    print(f"Explanations: {results_dir / 'explainer'}")
+    
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

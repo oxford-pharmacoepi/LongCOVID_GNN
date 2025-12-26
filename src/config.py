@@ -19,17 +19,21 @@ class Config:
         # Dataset settings
         self.as_dataset = 'associationByOverallDirect'
         self.negative_sampling_approach = 'random'
+        self.pos_neg_ratio = 1  # Ratio of positive to negative samples (1:1, 1:10, 1:100)
         
         # Model hyperparameters
         self.model_config = {
-            'learning_rate': 0.0005,
+            'learning_rate': 0.001,
+            'weight_decay': 1e-4,
             'hidden_channels': 16,
             'out_channels': 16,
             'num_layers': 2,
             'dropout_rate': 0.5,
-            'num_epochs': 1000,
+            'num_epochs': 200,
             'patience': 10,
-            'batch_size': 1000
+            'batch_size': 512,
+            'heads': 4,
+            'concat': False
         }
         
         # Training settings
@@ -43,7 +47,7 @@ class Config:
         self.network_config = {
             'disease_similarity_network': False,
             'molecule_similarity_network': False,
-            'reactome_network': False,
+            'reactome_network': True,
             'trial_edges': False
         }
         
@@ -70,7 +74,7 @@ class Config:
             self.general_path = r"C:\OpenTargets_datasets\downloads"
             self.results_path = r"C:\OpenTargets_datasets\test_results"
         else:
-            self.general_path = "data/raw/"
+            self.general_path = "raw_data"  # Fixed: was "data/raw/" 
             self.results_path = "results/"
         
         # Create directories
@@ -83,13 +87,13 @@ class Config:
             'val_indication': f"{self.general_path}/{self.validation_version}/indication",
             'test_indication': f"{self.general_path}/{self.test_version}/indication",
             'molecule': f"{self.general_path}/{self.training_version}/molecule",
-            'disease': f"{self.general_path}/{self.training_version}/diseases",
-            'val_disease': f"{self.general_path}/{self.validation_version}/diseases",
-            'test_disease': f"{self.general_path}/{self.test_version}/diseases",
-            'gene': f"{self.general_path}/{self.training_version}/targets",
-            'associations': f"{self.general_path}/{self.training_version}/{self.as_dataset}",
+            'diseases': f"{self.general_path}/{self.training_version}/diseases",  # Fixed: diseases not disease
+            'val_diseases': f"{self.general_path}/{self.validation_version}/diseases",
+            'test_diseases': f"{self.general_path}/{self.test_version}/diseases", 
+            'targets': f"{self.general_path}/{self.training_version}/targets",    # Fixed: targets not gene
+            'associations': f"{self.general_path}/{self.training_version}/{self.as_dataset}",  # This matches associationByOverallDirect
             'results': self.results_path,
-            'processed': "data/processed/",
+            'processed': "processed_data/",
             'models': f"{self.results_path}/models/",
             'predictions': f"{self.results_path}/predictions/",
             'explainer': f"{self.results_path}/explainer/"

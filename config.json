@@ -4,16 +4,20 @@
   "test_version": 24.06,
   "as_dataset": "associationByOverallDirect",
   "negative_sampling_approach": "random",
+  "pos_neg_ratio": 1,
   
   "model_config": {
-    "learning_rate": 0.0005,
+    "learning_rate": 0.001,
+    "weight_decay": 1e-4,
     "hidden_channels": 16,
     "out_channels": 16,
     "num_layers": 2,
     "dropout_rate": 0.5,
-    "num_epochs": 1000,
+    "num_epochs": 200,
     "patience": 10,
-    "batch_size": 1000
+    "batch_size": 512,
+    "heads": 4,
+    "concat": false
   },
   
   "explainer_config": {
@@ -27,13 +31,13 @@
   "network_config": {
     "disease_similarity_network": false,
     "molecule_similarity_network": false,
-    "reactome_network": false,
+    "reactome_network": true,
     "trial_edges": false
   },
   
   "paths": {
-    "general_path": "data/raw/",
-    "processed_path": "data/processed/", 
+    "general_path": "raw_data/",
+    "processed_path": "processed_data/", 
     "results_path": "results/"
   },
   

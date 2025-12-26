@@ -115,7 +115,14 @@ class DataProcessor:
         """Load and preprocess indication data."""
         print(f"Loading indication data from {path}")
         
-        indication_dataset = ds.dataset(path, format="parquet")
+        # Use glob pattern to only read parquet files, excluding index.html
+        import glob
+        parquet_files = glob.glob(f"{path}/*.parquet")
+        
+        if not parquet_files:
+            raise FileNotFoundError(f"No parquet files found in {path}")
+        
+        indication_dataset = ds.dataset(parquet_files, format="parquet")
         indication_table = indication_dataset.to_table()
         
         # Filter for drugs with approved indications
@@ -128,7 +135,14 @@ class DataProcessor:
         """Load and preprocess molecule data."""
         print(f"Loading molecule data from {path}")
         
-        molecule_dataset = ds.dataset(path, format="parquet")
+        # Use glob pattern to only read parquet files, excluding index.html
+        import glob
+        parquet_files = glob.glob(f"{path}/*.parquet")
+        
+        if not parquet_files:
+            raise FileNotFoundError(f"No parquet files found in {path}")
+        
+        molecule_dataset = ds.dataset(parquet_files, format="parquet")
         molecule_table = molecule_dataset.to_table()
         
         # Clean drug type data
@@ -152,7 +166,14 @@ class DataProcessor:
         """Load and preprocess disease data."""
         print(f"Loading disease data from {path}")
         
-        disease_dataset = ds.dataset(path, format="parquet")
+        # Use glob pattern to only read parquet files, excluding index.html
+        import glob
+        parquet_files = glob.glob(f"{path}/*.parquet")
+        
+        if not parquet_files:
+            raise FileNotFoundError(f"No parquet files found in {path}")
+        
+        disease_dataset = ds.dataset(parquet_files, format="parquet")
         disease_table = disease_dataset.to_table()
         
         # Filter out diseases without therapeutic areas
@@ -198,7 +219,14 @@ class DataProcessor:
         """Load and preprocess gene/target data."""
         print(f"Loading gene data from {path}")
         
-        gene_dataset = ds.dataset(path, format="parquet")
+        # Use glob pattern to only read parquet files, excluding index.html
+        import glob
+        parquet_files = glob.glob(f"{path}/*.parquet")
+        
+        if not parquet_files:
+            raise FileNotFoundError(f"No parquet files found in {path}")
+        
+        gene_dataset = ds.dataset(parquet_files, format="parquet")
         gene_table = gene_dataset.to_table().flatten().flatten()
         
         # Version-specific column selection
@@ -217,7 +245,14 @@ class DataProcessor:
         """Load and preprocess associations data."""
         print(f"Loading associations data from {path}")
         
-        associations_dataset = ds.dataset(path, format="parquet")
+        # Use glob pattern to only read parquet files, excluding index.html
+        import glob
+        parquet_files = glob.glob(f"{path}/*.parquet")
+        
+        if not parquet_files:
+            raise FileNotFoundError(f"No parquet files found in {path}")
+        
+        associations_dataset = ds.dataset(parquet_files, format="parquet")
         associations_table = associations_dataset.to_table()
         
         # Find score column
@@ -298,9 +333,9 @@ class DataProcessor:
         
         return gene_reactome_table
     
-    def filter_associations_by_genes_and_diseases(self, associations_table, gene_ids, disease_ids, score_column, threshold=0.01):
+    def filter_associations_by_genes_and_diseases(self, associations_table, gene_ids, disease_ids, score_column, threshold=0.1):
         """Filter associations by linked genes and diseases with score threshold."""
-        print("Filtering associations by genes and diseases...")
+        print(f"Filtering associations by genes and diseases (threshold >= {threshold})...")
         
         # Filter for genes linked with approved drugs
         gene_filter_mask = pc.is_in(
@@ -320,7 +355,7 @@ class DataProcessor:
         score_threshold = pc.field(score_column) >= threshold
         filtered_associations = filtered_associations.filter(score_threshold)
         
-        print(f"Filtered to {len(filtered_associations)} high-quality associations")
+        print(f"Filtered to {len(filtered_associations)} high-quality associations (threshold >= {threshold})")
         return filtered_associations
     
     def create_node_mappings(self, molecule_df, disease_df, gene_table, version):
@@ -338,12 +373,19 @@ class DataProcessor:
             reactome = gene_table.column('reactome').combine_chunks().flatten()
         else:
             pathways_column = gene_table.column('pathways').combine_chunks().flatten()
-            reactome = pathways_column.field(0) if pathways_column.length() > 0 else pa.array([])
+            reactome = pathways_column.field(0) if len(pathways_column) > 0 else pa.array([])
         
-        reactome_list = list(reactome.unique().to_pylist()) if reactome.length() > 0 else []
+        reactome_list = list(reactome.unique().to_pylist()) if len(reactome) > 0 else []
         
-        # Extract therapeutic areas
-        therapeutic_area = disease_df.column('therapeuticAreas').combine_chunks().flatten()
+        # Extract therapeutic areas - handle pandas DataFrame
+        if isinstance(disease_df, pd.DataFrame):
+            # Convert pandas DataFrame to PyArrow Table for consistent processing
+            disease_table = pa.Table.from_pandas(disease_df)
+            therapeutic_area = disease_table.column('therapeuticAreas').combine_chunks().flatten()
+        else:
+            # Already a PyArrow Table
+            therapeutic_area = disease_df.column('therapeuticAreas').combine_chunks().flatten()
+        
         therapeutic_area_list = list(therapeutic_area.unique().to_pylist())
         
         # Create sequential index mappings
@@ -436,7 +478,7 @@ class DataProcessor:
         
         os.makedirs(output_dir, exist_ok=True)
         
-        # Save as JSON files
+        # Save as JSON files - include both mappings and lists
         mapping_files = [
             'drug_key_mapping', 'drug_type_key_mapping', 'gene_key_mapping',
             'reactome_key_mapping', 'disease_key_mapping', 'therapeutic_area_key_mapping'
@@ -447,6 +489,32 @@ class DataProcessor:
                 filepath = os.path.join(output_dir, f"{mapping_name}.json")
                 with open(filepath, 'w') as f:
                     json.dump(mappings[mapping_name], f, indent=2)
+        
+        # Generate and save the lists from the mappings
+        if 'drug_key_mapping' in mappings:
+            mappings['approved_drugs_list'] = list(mappings['drug_key_mapping'].keys())
+        if 'drug_type_key_mapping' in mappings:
+            mappings['drug_type_list'] = list(mappings['drug_type_key_mapping'].keys())
+        if 'gene_key_mapping' in mappings:
+            mappings['gene_list'] = list(mappings['gene_key_mapping'].keys())
+        if 'reactome_key_mapping' in mappings:
+            mappings['reactome_list'] = list(mappings['reactome_key_mapping'].keys())
+        if 'disease_key_mapping' in mappings:
+            mappings['disease_list'] = list(mappings['disease_key_mapping'].keys())
+        if 'therapeutic_area_key_mapping' in mappings:
+            mappings['therapeutic_area_list'] = list(mappings['therapeutic_area_key_mapping'].keys())
+        
+        # Save the lists as JSON files
+        list_files = [
+            'approved_drugs_list', 'drug_type_list', 'gene_list',
+            'reactome_list', 'disease_list', 'therapeutic_area_list'
+        ]
+        
+        for list_name in list_files:
+            if list_name in mappings:
+                filepath = os.path.join(output_dir, f"{list_name}.json")
+                with open(filepath, 'w') as f:
+                    json.dump(mappings[list_name], f, indent=2)
         
         # Save complete mappings as pickle
         filepath = os.path.join(output_dir, "all_mappings.pkl")
@@ -468,7 +536,9 @@ class DataProcessor:
             mappings = {}
             mapping_files = [
                 'drug_key_mapping', 'drug_type_key_mapping', 'gene_key_mapping',
-                'reactome_key_mapping', 'disease_key_mapping', 'therapeutic_area_key_mapping'
+                'reactome_key_mapping', 'disease_key_mapping', 'therapeutic_area_key_mapping',
+                'approved_drugs_list', 'drug_type_list', 'gene_list',
+                'reactome_list', 'disease_list', 'therapeutic_area_list'
             ]
             
             for mapping_name in mapping_files:
@@ -496,45 +566,25 @@ class DataProcessor:
         
         print("Processed data saved successfully")
 
-
-class NegativeSampler:
-    """Class for generating negative samples for training."""
+def detect_data_mode(config, force_mode=None):
+    """
+    Detect whether to use raw or processed data mode.
     
-    def __init__(self, strategy='random'):
-        self.strategy = strategy
-    
-    def generate_negative_samples(self, all_possible_pairs, positive_pairs, n_samples=None):
-        """Generate negative samples using specified strategy."""
-        set_seed(42)  # Ensure reproducibility
-        
-        positive_set = set(positive_pairs)
-        negative_candidates = list(set(all_possible_pairs) - positive_set)
-        
-        if n_samples is None:
-            n_samples = len(positive_pairs)
-        
-        if self.strategy == 'random':
-            return self._random_sampling(negative_candidates, n_samples)
-        elif self.strategy == 'BPR':
-            return self._bpr_sampling(negative_candidates, n_samples)
+    Parameters:
+        config: Configuration object with paths
+        force_mode: Optional string to force mode - either "raw" or "processed"
+    """
+    if force_mode:
+        if force_mode == "raw":
+            print("Forced raw data mode - using Option 1 workflow")
+            return "raw"
+        elif force_mode == "processed":
+            print("Forced processed data mode - using Option 2 workflow") 
+            return "processed"
         else:
-            raise ValueError(f"Unknown sampling strategy: {self.strategy}")
+            raise ValueError(f"Invalid force_mode: {force_mode}. Must be 'raw' or 'processed'")
     
-    def _random_sampling(self, candidates, n_samples):
-        """Simple random sampling of negative pairs."""
-        import random
-        random.seed(42)
-        return random.sample(candidates, min(n_samples, len(candidates)))
-    
-    def _bpr_sampling(self, candidates, n_samples):
-        """Bayesian Personalized Ranking sampling strategy."""
-        # For now, implement as random sampling
-        # Can be enhanced with more sophisticated sampling logic
-        return self._random_sampling(candidates, n_samples)
-
-
-def detect_data_mode(config):
-    """Detect whether to use raw data or pre-processed data."""
+    # Default auto-detection logic (prioritize raw data for temporal validation)
     processed_path = config.paths['processed']
     
     # Check if pre-processed data exists
@@ -548,17 +598,18 @@ def detect_data_mode(config):
     raw_files_exist = (
         os.path.exists(config.paths['indication']) and
         os.path.exists(config.paths['molecule']) and
-        os.path.exists(config.paths['disease']) and
-        os.path.exists(config.paths['gene']) and
+        os.path.exists(config.paths['diseases']) and
+        os.path.exists(config.paths['targets']) and
         os.path.exists(config.paths['associations'])
     )
     
-    if processed_files_exist:
-        print("Pre-processed data detected - using Option 2 workflow")
-        return "processed"
-    elif raw_files_exist:
+    # Prioritize raw data when both exist (for temporal validation)
+    if raw_files_exist:
         print("Raw OpenTargets data detected - using Option 1 workflow")
         return "raw"
+    elif processed_files_exist:
+        print("Pre-processed data detected - using Option 2 workflow")
+        return "processed"
     else:
         raise FileNotFoundError(
             "Neither pre-processed nor raw data found. "

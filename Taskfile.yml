@@ -1,0 +1,16 @@
+# https://taskfile.dev
+
+version: '3'
+
+includes:
+  # Include the run tasks from .task directory
+  run: ./.task/run.yml
+
+vars:
+  GREETING: Hello, World!
+
+tasks:
+  default:
+    cmds:
+      - echo "{{.GREETING}}"
+    silent: true

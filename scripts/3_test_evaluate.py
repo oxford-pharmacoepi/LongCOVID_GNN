@@ -22,20 +22,68 @@ import os
 import argparse
 from pathlib import Path
 import random
+import glob
 
-# Import from shared modules
-from src.models import GCNModel, TransformerModel, SAGEModel, MODEL_CLASSES
-from src.utils import set_seed, enable_full_reproducibility, calculate_metrics, calculate_bootstrap_ci
-from src.config import get_config, create_custom_config
+
+def find_latest_graph(results_dir='results'):
+    """Auto-detect the latest graph file."""
+    graph_patterns = [
+        os.path.join(results_dir, 'graph_*.pt'),
+        'graph_*.pt',
+        os.path.join('data', 'processed', '*.pt'),
+    ]
+    
+    graph_files = []
+    for pattern in graph_patterns:
+        graph_files.extend(glob.glob(pattern))
+    
+    if not graph_files:
+        raise FileNotFoundError("No graph files found. Please create a graph first using script 1_create_graph.py")
+    
+    # Sort by modification time (most recent first)
+    latest_graph = max(graph_files, key=os.path.getmtime)
+    print(f"Auto-detected latest graph: {latest_graph}")
+    return latest_graph
+
+
+def find_latest_models(results_dir='results'):
+    """Auto-detect the latest trained models directory or files."""
+    # Look for individual model files
+    model_patterns = [
+        os.path.join(results_dir, '*_best_model_*.pt'),
+        os.path.join(results_dir, 'models', '*_best_model_*.pt'),
+        '*_best_model_*.pt',
+    ]
+    
+    model_files = []
+    for pattern in model_patterns:
+        model_files.extend(glob.glob(pattern))
+    
+    if not model_files:
+        raise FileNotFoundError("No trained models found. Please train models first using script 2_train_models.py")
+    
+    # If multiple models found, return the directory containing the most recent one
+    latest_model = max(model_files, key=os.path.getmtime)
+    models_dir = os.path.dirname(latest_model) or results_dir
+    print(f"Auto-detected models directory: {models_dir}")
+    return models_dir
 
 
 class ModelEvaluator:
     """Comprehensive model evaluation with FP export for GNNExplainer."""
     
-    def __init__(self, results_path="results/"):
+    def __init__(self, results_path="results/", use_mlflow=True, mlflow_experiment_name=None):
         self.results_path = results_path
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.results_dirs = self._create_results_structure()
+        
+        # Initialize MLflow tracker
+        self.use_mlflow = use_mlflow
+        self.mlflow_tracker = None
+        if use_mlflow:
+            experiment_name = mlflow_experiment_name or "drug_disease_evaluation"
+            self.mlflow_tracker = ExperimentTracker(experiment_name=experiment_name)
+            print(f"MLflow tracking enabled: {experiment_name}")
         
     def _create_results_structure(self):
         """Create organized results directory structure."""
@@ -147,7 +195,7 @@ class ModelEvaluator:
         
         return test_edge_tensor, test_label_tensor
     
-    def test_single_model(self, model_info, graph, test_edge_tensor, test_label_tensor):
+    def test_single_model(self, model_info, graph, test_edge_tensor, test_label_tensor, config):
         """Test a single model and return detailed results."""
         model_path = model_info['model_path']
         model_class = model_info['model_class']
@@ -155,16 +203,19 @@ class ModelEvaluator:
         
         print(f"Testing model from {model_path}")
         
-        # Load model
+        # Get model configuration from config
+        model_config = config.get_model_config()
+        
+        # Load model with config parameters
         model = model_class(
             in_channels=graph.x.size(1),
-            hidden_channels=16,
-            out_channels=16,
-            num_layers=2,
-            dropout_rate=0.5
+            hidden_channels=model_config['hidden_channels'],
+            out_channels=model_config['out_channels'],
+            num_layers=model_config['num_layers'],
+            dropout_rate=model_config['dropout_rate']
         ).to(self.device)
         
-        model.load_state_dict(torch.load(model_path, map_location=self.device))
+        model.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=False))
         model.eval()
         
         # Move data to device
@@ -173,7 +224,7 @@ class ModelEvaluator:
         test_label_tensor = test_label_tensor.to(self.device)
         
         # Make predictions in batches to avoid memory issues
-        batch_size = 1000
+        batch_size = model_config['batch_size']
         test_probs = []
         
         with torch.no_grad():
@@ -199,6 +250,7 @@ class ModelEvaluator:
         
         return {
             'model': model,
+            'model_path': model_path,
             'probabilities': test_probs,
             'predictions': test_preds,
             'labels': test_labels_np,
@@ -207,10 +259,190 @@ class ModelEvaluator:
             'threshold': threshold
         }
     
+    def test_all_models(self, trained_models_info, graph, test_edge_tensor, test_label_tensor,
+                       export_fp=True, fp_threshold=0.7, fp_top_k=10000, mappings_dir=None, 
+                       config=None, training_run_ids=None):
+        """Test all trained models and return comprehensive results."""
+        
+        test_results = {}
+        
+        for model_name, model_info in trained_models_info.items():
+            print(f"\nTesting {model_name}...")
+            
+            # Start MLflow run for this model
+            if self.mlflow_tracker:
+                run_name = f"test_{model_name}_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                self.mlflow_tracker.start_run(run_name=run_name)
+                
+                # Link to training run if available
+                if training_run_ids and model_name in training_run_ids:
+                    self.mlflow_tracker.log_param("training_run_id", training_run_ids[model_name])
+                
+                # Log test configuration
+                self.mlflow_tracker.log_param("model_name", model_name)
+                self.mlflow_tracker.log_param("model_path", model_info['model_path'])
+                self.mlflow_tracker.log_param("threshold", model_info['threshold'])
+                self.mlflow_tracker.log_param("test_set_size", len(test_edge_tensor))
+                self.mlflow_tracker.log_param("export_fp", export_fp)
+                self.mlflow_tracker.log_param("fp_threshold", fp_threshold)
+                self.mlflow_tracker.log_param("fp_top_k", fp_top_k)
+                self.mlflow_tracker.log_param("device", str(self.device))
+            
+            try:
+                # Test model
+                results = self.test_single_model(model_info, graph, test_edge_tensor, test_label_tensor, config)
+                test_results[model_name] = results
+                
+                # Log test metrics to MLflow
+                if self.mlflow_tracker:
+                    self._log_metrics_to_mlflow(model_name, results)
+                
+                # Export FP predictions if requested
+                if export_fp:
+                    fp_results = self.export_fp_predictions(
+                        model_name=model_name,
+                        model_results=results,
+                        graph=graph,
+                        threshold=fp_threshold,
+                        top_k=fp_top_k,
+                        mappings_dir=mappings_dir
+                    )
+                    
+                    if fp_results:
+                        results['fp_export'] = fp_results
+                        print(f"FP export successful: {fp_results['fp_count']} predictions exported")
+                        
+                        # Log FP predictions to MLflow
+                        if self.mlflow_tracker:
+                            self._log_fp_export_to_mlflow(fp_results)
+                
+                # Print results with confidence intervals
+                metrics = results['metrics']
+                ci_results = metrics.get('ci_results', {})
+                
+                print(f"\nTest Results for {model_name}:")
+                print("-" * 40)
+                print(f"AUC: {metrics['auc']:.4f}")
+                if 'auc' in ci_results:
+                    ci = ci_results['auc']
+                    print(f"     (95% CI: [{ci['ci_lower']:.4f}, {ci['ci_upper']:.4f}])")
+                
+                print(f"APR: {metrics['apr']:.4f}")
+                if 'apr' in ci_results:
+                    ci = ci_results['apr']
+                    print(f"     (95% CI: [{ci['ci_lower']:.4f}, {ci['ci_upper']:.4f}])")
+                
+                print(f"F1-Score: {metrics['f1']:.4f}")
+                if 'f1' in ci_results:
+                    ci = ci_results['f1']
+                    print(f"         (95% CI: [{ci['ci_lower']:.4f}, {ci['ci_upper']:.4f}])")
+                
+                print(f"Accuracy: {metrics['accuracy']:.4f}")
+                
+                # End MLflow run for this model
+                if self.mlflow_tracker:
+                    self.mlflow_tracker.end_run()
+                
+            except Exception as e:
+                print(f"Error testing {model_name}: {e}")
+                if self.mlflow_tracker:
+                    self.mlflow_tracker.end_run()
+                continue
+        
+        return test_results
+    
+    def _log_metrics_to_mlflow(self, model_name, results):
+        """Log test metrics to MLflow."""
+        if not self.mlflow_tracker:
+            return
+        
+        metrics = results['metrics']
+        
+        # Log primary metrics
+        self.mlflow_tracker.log_metric("test_auc", metrics['auc'])
+        self.mlflow_tracker.log_metric("test_apr", metrics['apr'])
+        self.mlflow_tracker.log_metric("test_f1", metrics['f1'])
+        self.mlflow_tracker.log_metric("test_accuracy", metrics['accuracy'])
+        self.mlflow_tracker.log_metric("test_precision", metrics['precision'])
+        self.mlflow_tracker.log_metric("test_recall", metrics['recall'])
+        self.mlflow_tracker.log_metric("test_specificity", metrics['specificity'])
+        # Sensitivity is the same as recall in binary classification
+        self.mlflow_tracker.log_metric("test_sensitivity", metrics['recall'])
+        
+        # Log confusion matrix values (note the nested structure from calculate_metrics)
+        cm = metrics['confusion_matrix']
+        self.mlflow_tracker.log_metric("test_true_negatives", cm['TN'])
+        self.mlflow_tracker.log_metric("test_false_positives", cm['FP'])
+        self.mlflow_tracker.log_metric("test_false_negatives", cm['FN'])
+        self.mlflow_tracker.log_metric("test_true_positives", cm['TP'])
+        
+        # Log confidence intervals if available
+        ci_results = metrics.get('ci_results', {})
+        for metric_name in ['auc', 'apr', 'f1', 'precision', 'recall', 'specificity']:
+            if metric_name in ci_results:
+                ci = ci_results[metric_name]
+                self.mlflow_tracker.log_metric(f"test_{metric_name}_ci_lower", ci['ci_lower'])
+                self.mlflow_tracker.log_metric(f"test_{metric_name}_ci_upper", ci['ci_upper'])
+                self.mlflow_tracker.log_metric(f"test_{metric_name}_ci_width", ci['ci_width'])
+        
+        print(f"✓ Test metrics logged to MLflow for {model_name}")
+    
+    def _log_fp_export_to_mlflow(self, fp_results):
+        """Log false positive export information to MLflow."""
+        if not self.mlflow_tracker:
+            return
+        
+        summary = fp_results['summary']
+        
+        # Log FP export metrics
+        self.mlflow_tracker.log_metric("fp_export_count", summary['exported_fp_count'])
+        self.mlflow_tracker.log_metric("fp_total_candidates", summary['total_fp_candidates'])
+        self.mlflow_tracker.log_metric("fp_mean_confidence", summary['mean_confidence'])
+        self.mlflow_tracker.log_metric("fp_min_confidence", summary['confidence_range'][0])
+        self.mlflow_tracker.log_metric("fp_max_confidence", summary['confidence_range'][1])
+        
+        # Log FP export parameters
+        self.mlflow_tracker.log_param("fp_threshold", summary['fp_threshold'])
+        self.mlflow_tracker.log_param("fp_top_k", summary['top_k'])
+        
+        # Log FP prediction files as artifacts
+        if 'csv_path' in fp_results:
+            self.mlflow_tracker.log_artifact(fp_results['csv_path'])
+        if 'summary_path' in fp_results:
+            self.mlflow_tracker.log_artifact(fp_results['summary_path'])
+        
+        print(f"✓ FP predictions logged to MLflow")
+
     def export_fp_predictions(self, model_name, model_results, graph, 
-                             threshold=0.7, top_k=10000):
+                             threshold=0.7, top_k=10000, mappings_dir=None):
         """Export False Positive predictions for GNNExplainer analysis."""
         print(f"\nExporting FP predictions for {model_name}...")
+        
+        # Load actual mappings if available
+        drug_idx_to_name = {}
+        disease_idx_to_name = {}
+        
+        if mappings_dir and os.path.exists(mappings_dir):
+            try:
+                # Load drug mappings (reverse mapping from index to name)
+                drug_mapping_path = os.path.join(mappings_dir, "drug_key_mapping.json")
+                with open(drug_mapping_path, 'r') as f:
+                    drug_name_to_idx = json.load(f)
+                    drug_idx_to_name = {int(idx): name for name, idx in drug_name_to_idx.items()}
+                
+                # Load disease mappings (reverse mapping from index to name)
+                disease_mapping_path = os.path.join(mappings_dir, "disease_key_mapping.json")
+                with open(disease_mapping_path, 'r') as f:
+                    disease_name_to_idx = json.load(f)
+                    disease_idx_to_name = {int(idx): name for name, idx in disease_name_to_idx.items()}
+                
+                print(f"Loaded mappings: {len(drug_idx_to_name)} drugs, {len(disease_idx_to_name)} diseases")
+                
+            except Exception as e:
+                print(f"Warning: Could not load mappings from {mappings_dir}: {e}")
+                print("Will use generic names instead.")
+        else:
+            print("Warning: No mappings directory provided. Using generic names.")
         
         # Extract data
         probabilities = model_results['probabilities']
@@ -237,14 +469,20 @@ class ModelEvaluator:
         
         # Create FP predictions data
         fp_data = []
+        missing_mappings_count = 0
+        
         for i, (fp_idx, score) in enumerate(zip(top_fp_indices, top_fp_scores)):
             edge_idx = int(fp_idx)
             drug_idx = int(test_edges[edge_idx, 0])
             disease_idx = int(test_edges[edge_idx, 1])
             
-            # Generate names (in practice, these would come from mappings)
-            drug_name = f"Drug_{drug_idx}"
-            disease_name = f"Disease_{disease_idx}"
+            # Get actual names from mappings if available, otherwise use generic names
+            drug_name = drug_idx_to_name.get(drug_idx, f"Drug_{drug_idx}")
+            disease_name = disease_idx_to_name.get(disease_idx, f"Disease_{disease_idx}")
+            
+            # Count missing mappings for statistics
+            if drug_idx not in drug_idx_to_name or disease_idx not in disease_idx_to_name:
+                missing_mappings_count += 1
             
             fp_data.append({
                 'rank': i + 1,
@@ -257,6 +495,9 @@ class ModelEvaluator:
                 'true_label': 0,  # All FPs have true label 0
                 'model': model_name
             })
+        
+        if missing_mappings_count > 0:
+            print(f"Warning: {missing_mappings_count}/{len(fp_data)} pairs used generic names due to missing mappings")
         
         # Convert to DataFrame
         fp_df = pd.DataFrame(fp_data)
@@ -310,83 +551,39 @@ class ModelEvaluator:
             'summary': summary_data
         }
     
-    def test_all_models(self, trained_models_info, graph, test_edge_tensor, test_label_tensor,
-                       export_fp=True, fp_threshold=0.7, fp_top_k=10000):
-        """Test all trained models and return comprehensive results."""
-        
-        test_results = {}
-        
-        for model_name, model_info in trained_models_info.items():
-            print(f"\nTesting {model_name}...")
-            
-            try:
-                # Test model
-                results = self.test_single_model(model_info, graph, test_edge_tensor, test_label_tensor)
-                test_results[model_name] = results
-                
-                # Export FP predictions if requested
-                if export_fp:
-                    fp_results = self.export_fp_predictions(
-                        model_name=model_name,
-                        model_results=results,
-                        graph=graph,
-                        threshold=fp_threshold,
-                        top_k=fp_top_k
-                    )
-                    
-                    if fp_results:
-                        results['fp_export'] = fp_results
-                        print(f"FP export successful: {fp_results['fp_count']} predictions exported")
-                
-                # Print results with confidence intervals
-                metrics = results['metrics']
-                ci_results = metrics.get('ci_results', {})
-                
-                print(f"\nTest Results for {model_name}:")
-                print("-" * 40)
-                print(f"AUC: {metrics['auc']:.4f}")
-                if 'auc' in ci_results:
-                    ci = ci_results['auc']
-                    print(f"     (95% CI: [{ci['ci_lower']:.4f}, {ci['ci_upper']:.4f}])")
-                
-                print(f"APR: {metrics['apr']:.4f}")
-                if 'apr' in ci_results:
-                    ci = ci_results['apr']
-                    print(f"     (95% CI: [{ci['ci_lower']:.4f}, {ci['ci_upper']:.4f}])")
-                
-                print(f"F1-Score: {metrics['f1']:.4f}")
-                if 'f1' in ci_results:
-                    ci = ci_results['f1']
-                    print(f"         (95% CI: [{ci['ci_lower']:.4f}, {ci['ci_upper']:.4f}])")
-                
-                print(f"Accuracy: {metrics['accuracy']:.4f}")
-                
-            except Exception as e:
-                print(f"Error testing {model_name}: {e}")
-                continue
-        
-        return test_results
-    
     def create_visualizations(self, test_results):
         """Create comprehensive visualizations of test results."""
         
         datetime_str = dt.datetime.now().strftime("%Y%m%d%H%M%S")
         
         # 1. ROC Curves
-        self._plot_roc_curves(test_results, datetime_str)
+        roc_path = self._plot_roc_curves(test_results, datetime_str)
         
         # 2. Precision-Recall Curves
-        self._plot_pr_curves(test_results, datetime_str)
+        pr_path = self._plot_pr_curves(test_results, datetime_str)
         
         # 3. Confusion Matrices
-        self._plot_confusion_matrices(test_results, datetime_str)
+        cm_path = self._plot_confusion_matrices(test_results, datetime_str)
         
         # 4. Metrics Comparison
-        self._plot_metrics_comparison(test_results, datetime_str)
+        metrics_path = self._plot_metrics_comparison(test_results, datetime_str)
         
         # 5. Interactive Plotly Visualizations
-        self._create_interactive_plots(test_results, datetime_str)
+        interactive_path = self._create_interactive_plots(test_results, datetime_str)
         
+        # Log all visualizations to MLflow in a dedicated run
+        if self.mlflow_tracker:
+            run_name = f"test_visualizations_{datetime_str}"
+            self.mlflow_tracker.start_run(run_name=run_name)
+            
+            # Log all visualization artifacts
+            for path in [roc_path, pr_path, cm_path, metrics_path, interactive_path]:
+                if path and os.path.exists(path):
+                    self.mlflow_tracker.log_artifact(path)
+            
+            self.mlflow_tracker.end_run()
+            print(f"✓ All visualizations logged to MLflow")
+    
     def _plot_roc_curves(self, test_results, datetime_str):
         """Plot ROC curves for all models."""
         plt.figure(figsize=(12, 10))
@@ -413,8 +610,11 @@ class ModelEvaluator:
         plt.legend(loc="lower right", fontsize=12)
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.savefig(f'{self.results_dirs["figures"]}/test_roc_curves_{datetime_str}.png', dpi=300, bbox_inches='tight')
+        
+        output_path = f'{self.results_dirs["figures"]}/test_roc_curves_{datetime_str}.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
+        return output_path
     
     def _plot_pr_curves(self, test_results, datetime_str):
         """Plot Precision-Recall curves for all models."""
@@ -445,8 +645,11 @@ class ModelEvaluator:
         plt.legend(loc="lower left", fontsize=12)
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
-        plt.savefig(f'{self.results_dirs["figures"]}/test_pr_curves_{datetime_str}.png', dpi=300, bbox_inches='tight')
+        
+        output_path = f'{self.results_dirs["figures"]}/test_pr_curves_{datetime_str}.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
+        return output_path
     
     def _plot_confusion_matrices(self, test_results, datetime_str):
         """Plot confusion matrices for all models."""
@@ -467,8 +670,11 @@ class ModelEvaluator:
             axes[i].set_yticklabels(['Negative', 'Positive'])
         
         plt.tight_layout()
-        plt.savefig(f'{self.results_dirs["figures"]}/test_confusion_matrices_{datetime_str}.png', dpi=300, bbox_inches='tight')
+        
+        output_path = f'{self.results_dirs["figures"]}/test_confusion_matrices_{datetime_str}.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
+        return output_path
     
     def _plot_metrics_comparison(self, test_results, datetime_str):
         """Plot comprehensive metrics comparison."""
@@ -507,8 +713,11 @@ class ModelEvaluator:
         
         plt.suptitle('Model Performance Comparison - Test Set', fontsize=16, fontweight='bold')
         plt.tight_layout()
-        plt.savefig(f'{self.results_dirs["figures"]}/test_metrics_comparison_{datetime_str}.png', dpi=300, bbox_inches='tight')
+        
+        output_path = f'{self.results_dirs["figures"]}/test_metrics_comparison_{datetime_str}.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
         plt.close()
+        return output_path
     
     def _create_interactive_plots(self, test_results, datetime_str):
         """Create interactive Plotly visualizations."""
@@ -544,7 +753,9 @@ class ModelEvaluator:
             width=800, height=600
         )
         
-        fig_roc.write_html(f'{self.results_dirs["figures"]}/interactive_roc_curves_{datetime_str}.html')
+        output_path = f'{self.results_dirs["figures"]}/interactive_roc_curves_{datetime_str}.html'
+        fig_roc.write_html(output_path)
+        return output_path
     
     def save_detailed_results(self, test_results):
         """Save detailed test results to files."""
@@ -560,7 +771,7 @@ class ModelEvaluator:
             
             # Add CI columns if available
             ci_results = results['metrics'].get('ci_results', {})
-            for metric in ['auc', 'apr', 'f1', 'precision', 'sensitivity', 'specificity']:
+            for metric in ['auc', 'apr', 'f1', 'precision', 'recall', 'specificity']:
                 if metric in ci_results:
                     ci = ci_results[metric]
                     row[f'{metric}_ci_lower'] = ci['ci_lower']
@@ -595,35 +806,54 @@ class ModelEvaluator:
 def main():
     """Main function."""
     parser = argparse.ArgumentParser(description='Test and evaluate trained models')
-    parser.add_argument('graph_path', help='Path to graph file (.pt)')
-    parser.add_argument('models_path', help='Path to trained models directory or single model file')
+    parser.add_argument('--graph', '--graph-path', dest='graph_path', default=None, help='Path to graph file (.pt) - auto-detects if not provided')
+    parser.add_argument('--model', '--models-path', dest='models_path', default=None, help='Path to trained models directory or single model file - auto-detects if not provided')
     parser.add_argument('--results-path', default='results/', help='Results output directory')
     parser.add_argument('--export-fp', action='store_true', default=True, help='Export FP predictions for GNNExplainer')
     parser.add_argument('--fp-threshold', type=float, default=0.7, help='FP confidence threshold')
     parser.add_argument('--fp-top-k', type=int, default=10000, help='Maximum FP predictions to export')
-    parser.add_argument('--config', type=str, help='Path to config JSON file')
+    parser.add_argument('--mappings-dir', type=str, help='Path to directory containing drug/disease mappings')
+    parser.add_argument('--no-mlflow', action='store_true', help='Disable MLflow tracking')
+    parser.add_argument('--mlflow-experiment-name', type=str, help='MLflow experiment name')
     
     args = parser.parse_args()
     
+    # Auto-detect graph if not provided
+    if not args.graph_path:
+        print("No graph specified, auto-detecting latest graph...")
+        try:
+            args.graph_path = find_latest_graph(args.results_path)
+        except FileNotFoundError as e:
+            print(f"Error: {e}")
+            return None
+    
+    # Auto-detect models if not provided
+    if not args.models_path:
+        print("No models specified, auto-detecting latest models...")
+        try:
+            args.models_path = find_latest_models(args.results_path)
+        except FileNotFoundError as e:
+            print(f"Error: {e}")
+            return None
+    
     # Load configuration
-    if args.config and os.path.exists(args.config):
-        with open(args.config, 'r') as f:
-            config_dict = json.load(f)
-        config = create_custom_config(**config_dict)
-    else:
-        config = get_config()
+    config = get_config()
     
     # Set reproducibility
     enable_full_reproducibility(42)
     
-    # Initialize evaluator
-    evaluator = ModelEvaluator(args.results_path)
+    # Initialize evaluator (MLflow enabled by default unless --no-mlflow is passed)
+    evaluator = ModelEvaluator(
+        results_path=args.results_path,
+        use_mlflow=not args.no_mlflow,
+        mlflow_experiment_name=args.mlflow_experiment_name
+    )
     
     # Load graph
     if not os.path.exists(args.graph_path):
         raise FileNotFoundError(f"Graph file not found: {args.graph_path}")
     
-    graph = torch.load(args.graph_path, map_location=evaluator.device)
+    graph = torch.load(args.graph_path, map_location=evaluator.device, weights_only=False)
     print(f"Loaded graph: {graph}")
     
     # Load trained models information
@@ -634,6 +864,18 @@ def main():
         return None
     
     print(f"Found trained models: {list(trained_models_info.keys())}")
+    
+    # Auto-detect mappings directory if not provided
+    mappings_dir = args.mappings_dir
+    if not mappings_dir:
+        # Try to auto-detect mappings directory relative to workspace
+        workspace_root = Path(__file__).parent.parent
+        potential_mappings_dir = workspace_root / "processed_data" / "mappings"
+        if potential_mappings_dir.exists():
+            mappings_dir = str(potential_mappings_dir)
+            print(f"Auto-detected mappings directory: {mappings_dir}")
+        else:
+            print("Warning: No mappings directory found. Will use generic names for predictions.")
     
     # Create test data from graph
     test_edge_tensor, test_label_tensor = evaluator.create_test_data_from_graph(graph)
@@ -646,7 +888,9 @@ def main():
         test_label_tensor,
         export_fp=args.export_fp,
         fp_threshold=args.fp_threshold,
-        fp_top_k=args.fp_top_k
+        fp_top_k=args.fp_top_k,
+        mappings_dir=mappings_dir,
+        config=config
     )
     
     if not test_results:

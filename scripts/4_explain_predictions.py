@@ -26,6 +26,7 @@ import os
 from pathlib import Path
 import datetime as dt
 import warnings
+import glob
 
 warnings.filterwarnings('ignore')
 
@@ -33,6 +34,73 @@ warnings.filterwarnings('ignore')
 from src.models import GCNModel, TransformerModel, SAGEModel, MODEL_CLASSES
 from src.utils import set_seed, enable_full_reproducibility
 from src.config import get_config, create_custom_config
+from src.mlflow_tracker import ExperimentTracker
+
+
+def find_latest_graph(results_dir='results'):
+    """Auto-detect the latest graph file."""
+    graph_patterns = [
+        os.path.join(results_dir, 'graph_*.pt'),
+        'graph_*.pt',
+        os.path.join('data', 'processed', '*.pt'),
+    ]
+    
+    graph_files = []
+    for pattern in graph_patterns:
+        graph_files.extend(glob.glob(pattern))
+    
+    if not graph_files:
+        raise FileNotFoundError("No graph files found. Please create a graph first using script 1_create_graph.py")
+    
+    # Sort by modification time (most recent first)
+    latest_graph = max(graph_files, key=os.path.getmtime)
+    print(f"Auto-detected latest graph: {latest_graph}")
+    return latest_graph
+
+
+def find_latest_model(results_dir='results'):
+    """Auto-detect the latest trained model file."""
+    model_patterns = [
+        os.path.join(results_dir, '*_best_model_*.pt'),
+        os.path.join(results_dir, 'models', '*_best_model_*.pt'),
+        '*_best_model_*.pt',
+    ]
+    
+    model_files = []
+    for pattern in model_patterns:
+        model_files.extend(glob.glob(pattern))
+    
+    if not model_files:
+        raise FileNotFoundError("No trained models found. Please train models first using script 2_train_models.py")
+    
+    # Sort by modification time (most recent first)
+    latest_model = max(model_files, key=os.path.getmtime)
+    print(f"Auto-detected latest model: {latest_model}")
+    return latest_model
+
+
+def find_latest_predictions(results_dir='results'):
+    """Auto-detect the latest FP predictions file."""
+    predictions_patterns = [
+        os.path.join(results_dir, 'predictions', '*_FP_predictions_*.csv'),
+        os.path.join(results_dir, 'predictions', '*_FP_predictions_*.pt'),
+        os.path.join(results_dir, '*_FP_predictions_*.csv'),
+        os.path.join(results_dir, '*_FP_predictions_*.pt'),
+        'predictions/*_FP_predictions_*.csv',
+        'predictions/*_FP_predictions_*.pt',
+    ]
+    
+    prediction_files = []
+    for pattern in predictions_patterns:
+        prediction_files.extend(glob.glob(pattern))
+    
+    if not prediction_files:
+        raise FileNotFoundError("No FP prediction files found. Please run script 3_test_evaluate.py first with --export-fp flag")
+    
+    # Sort by modification time (most recent first)
+    latest_predictions = max(prediction_files, key=os.path.getmtime)
+    print(f"Auto-detected latest predictions: {latest_predictions}")
+    return latest_predictions
 
 
 class LinkPredictor(nn.Module):
@@ -128,6 +196,12 @@ class GNNExplainerAnalyzer:
             return cached_result
         
         try:
+            # Validate node indices first
+            num_nodes = self.graph.x.size(0)
+            if drug_idx >= num_nodes or disease_idx >= num_nodes:
+                print(f"Skipping invalid indices: drug_idx={drug_idx}, disease_idx={disease_idx}, max_nodes={num_nodes}")
+                return None
+            
             # Extract subgraph for efficiency
             subset, edge_index, mapping, edge_mask = k_hop_subgraph(
                 node_idx=[drug_idx, disease_idx],
@@ -136,8 +210,8 @@ class GNNExplainerAnalyzer:
                 relabel_nodes=True
             )
             
-            # Get subgraph features
-            sub_x = self.graph.x[subset].to(self.device)
+            # Get subgraph features and ensure float32 dtype
+            sub_x = self.graph.x[subset].float().to(self.device)
             edge_index = edge_index.to(self.device)
             
             # Map drug and disease indices to subgraph
@@ -286,9 +360,47 @@ class GNNExplainerAnalyzer:
         return explanations
 
 
-def load_fp_predictions(predictions_path):
-    """Load false positive predictions from CSV or PyTorch file."""
+def load_actual_mappings(mappings_dir):
+    """Load the real drug/disease mappings from processed data."""
+    import json
+    import os
+    
+    print(f"Loading actual mappings from {mappings_dir}")
+    
+    try:
+        # Load drug mappings
+        drug_mapping_path = os.path.join(mappings_dir, "drug_key_mapping.json")
+        with open(drug_mapping_path, 'r') as f:
+            drug_name_to_idx = json.load(f)
+        
+        # Load disease mappings  
+        disease_mapping_path = os.path.join(mappings_dir, "disease_key_mapping.json")
+        with open(disease_mapping_path, 'r') as f:
+            disease_name_to_idx = json.load(f)
+        
+        print(f"Loaded {len(drug_name_to_idx)} drug mappings and {len(disease_name_to_idx)} disease mappings")
+        return drug_name_to_idx, disease_name_to_idx
+        
+    except FileNotFoundError as e:
+        print(f"Error loading mappings: {e}")
+        print("Available files in mappings directory:")
+        for f in os.listdir(mappings_dir):
+            print(f"  {f}")
+        return None, None
+    except Exception as e:
+        print(f"Error loading mappings: {e}")
+        return None, None
+
+
+def load_fp_predictions(predictions_path, mappings_dir=None):
+    """Load false positive predictions from CSV or PyTorch file with proper index mapping."""
     print(f"Loading FP predictions from {predictions_path}")
+    
+    # Load actual mappings if directory provided
+    drug_name_to_idx = None
+    disease_name_to_idx = None
+    if mappings_dir and os.path.exists(mappings_dir):
+        drug_name_to_idx, disease_name_to_idx = load_actual_mappings(mappings_dir)
     
     if predictions_path.endswith('.csv'):
         df = pd.read_csv(predictions_path)
@@ -304,31 +416,151 @@ def load_fp_predictions(predictions_path):
             raise ValueError(f"No confidence column found. Available: {df.columns.tolist()}")
         
         fp_pairs = []
+        skipped_count = 0
+        
         for _, row in df.iterrows():
+            drug_name = row['drug_name']
+            disease_name = row['disease_name']
+            
+            # Try to get actual indices from mappings first
+            if drug_name_to_idx is not None and disease_name_to_idx is not None:
+                drug_idx = drug_name_to_idx.get(drug_name)
+                disease_idx = disease_name_to_idx.get(disease_name)
+                
+                # If direct lookup fails, try to extract index from generic name
+                if drug_idx is None and drug_name.startswith('Drug_'):
+                    try:
+                        potential_idx = int(drug_name.split('_')[1])
+                        # Check if this index exists in the range of mapped drugs
+                        drug_indices = list(drug_name_to_idx.values())
+                        if potential_idx in drug_indices:
+                            drug_idx = potential_idx
+                    except (ValueError, IndexError):
+                        pass
+                
+                if disease_idx is None and disease_name.startswith('Disease_'):
+                    try:
+                        potential_idx = int(disease_name.split('_')[1])
+                        # Check if this index exists in the range of mapped diseases
+                        disease_indices = list(disease_name_to_idx.values())
+                        if potential_idx in disease_indices:
+                            disease_idx = potential_idx
+                    except (ValueError, IndexError):
+                        pass
+                
+                if drug_idx is None or disease_idx is None:
+                    if skipped_count < 5:  # Only print first few warnings
+                        print(f"Warning: Skipping {drug_name} -> {disease_name} (not found in mappings)")
+                    skipped_count += 1
+                    continue
+                
+                drug_idx = int(drug_idx)
+                disease_idx = int(disease_idx)
+            else:
+                # Last resort fallback: extract indices directly from generic names only
+                print("Warning: No mappings found. Attempting to extract indices from names with 'Drug_' or 'Disease_' prefix.")
+                try:
+                    if drug_name.startswith('Drug_'):
+                        drug_idx = int(drug_name.split('_')[1])
+                    else:
+                        print(f"Error: Cannot extract drug index from '{drug_name}' (must start with 'Drug_')")
+                        skipped_count += 1
+                        continue
+                        
+                    if disease_name.startswith('Disease_'):
+                        disease_idx = int(disease_name.split('_')[1])
+                    else:
+                        print(f"Error: Cannot extract disease index from '{disease_name}' (must start with 'Disease_'")
+                        skipped_count += 1
+                        continue
+                except (ValueError, IndexError) as e:
+                    print(f"Error: Could not extract indices from {drug_name} -> {disease_name}: {e}")
+                    skipped_count += 1
+                    continue
+            
             fp_pairs.append({
-                'drug_name': row['drug_name'],
-                'disease_name': row['disease_name'],
-                'drug_idx': int(row.get('drug_idx', abs(hash(row['drug_name'])) % 10000)),
-                'disease_idx': int(row.get('disease_idx', abs(hash(row['disease_name'])) % 10000 + 10000)),
+                'drug_name': drug_name,
+                'disease_name': disease_name,
+                'drug_idx': drug_idx,
+                'disease_idx': disease_idx,
                 'confidence': float(row[confidence_col])
             })
+        
+        if skipped_count > 5:
+            print(f"Warning: Skipped {skipped_count} total predictions")
         
         print(f"Loaded {len(fp_pairs)} FP predictions from CSV")
         
     elif predictions_path.endswith('.pt'):
-        predictions = torch.load(predictions_path)
+        predictions = torch.load(predictions_path, weights_only=False)
         
         fp_pairs = []
+        skipped_count = 0
+        
         for i, pred in enumerate(predictions):
             if len(pred) >= 3:
                 drug_name, disease_name, confidence = pred[0], pred[1], float(pred[2])
+                
+                # Try to get actual indices from mappings first
+                if drug_name_to_idx is not None and disease_name_to_idx is not None:
+                    drug_idx = drug_name_to_idx.get(drug_name)
+                    disease_idx = disease_name_to_idx.get(disease_name)
+                    
+                    # If direct lookup fails, try to extract index from generic name
+                    if drug_idx is None and drug_name.startswith('Drug_'):
+                        try:
+                            potential_idx = int(drug_name.split('_')[1])
+                            drug_indices = list(drug_name_to_idx.values())
+                            if potential_idx in drug_indices:
+                                drug_idx = potential_idx
+                        except (ValueError, IndexError):
+                            pass
+                    
+                    if disease_idx is None and disease_name.startswith('Disease_'):
+                        try:
+                            potential_idx = int(disease_name.split('_')[1])
+                            disease_indices = list(disease_name_to_idx.values())
+                            if potential_idx in disease_indices:
+                                disease_idx = potential_idx
+                        except (ValueError, IndexError):
+                            pass
+                    
+                    if drug_idx is None or disease_idx is None:
+                        if skipped_count < 5:
+                            print(f"Warning: Skipping {drug_name} -> {disease_name} (not found in mappings)")
+                        skipped_count += 1
+                        continue
+                    
+                    drug_idx = int(drug_idx)
+                    disease_idx = int(disease_idx)
+                else:
+                    # Last resort fallback
+                    try:
+                        if drug_name.startswith('Drug_'):
+                            drug_idx = int(drug_name.split('_')[1])
+                        else:
+                            skipped_count += 1
+                            continue
+                            
+                        if disease_name.startswith('Disease_'):
+                            disease_idx = int(disease_name.split('_')[1])
+                        else:
+                            skipped_count += 1
+                            continue
+                    except (ValueError, IndexError):
+                        skipped_count += 1
+                        continue
+                
                 fp_pairs.append({
                     'drug_name': drug_name,
                     'disease_name': disease_name,
-                    'drug_idx': abs(hash(drug_name)) % 10000,
-                    'disease_idx': abs(hash(disease_name)) % 10000 + 10000,
+                    'drug_idx': drug_idx,
+                    'disease_idx': disease_idx,
                     'confidence': confidence
                 })
+        
+        if skipped_count > 5:
+            print(f"Warning: Skipped {skipped_count} total predictions")
         
         print(f"Loaded {len(fp_pairs)} FP predictions from PyTorch file")
     
@@ -424,6 +656,74 @@ def calculate_type_importance_analysis(explanations_dict, graph, idx_to_type=Non
                   f"std={std_score:.4f}, range=[{min_score:.4f}, {max_score:.4f}] ({len(scores)} nodes)")
     
     return {'node_type_stats': node_stats}
+
+
+def analyze_edge_types(explanations_dict, graph, idx_to_type=None):
+    """
+    Analyze which edge types are most important in predictions.
+    Classifies edges by the types of nodes they connect.
+    """
+    print("\nEDGE TYPE ANALYSIS:")
+    print("=" * 50)
+    
+    edge_type_importance = defaultdict(list)
+    edge_type_counts = defaultdict(int)
+    
+    for data in explanations_dict.values():
+        if data['has_explanation'] and 'important_edges' in data['explanation']:
+            for edge in data['explanation']['important_edges']:
+                source_idx = edge['source']
+                target_idx = edge['target']
+                importance = edge['importance']
+                
+                # Get node types
+                source_type = idx_to_type.get(source_idx, "Unknown") if idx_to_type else "Unknown"
+                target_type = idx_to_type.get(target_idx, "Unknown") if idx_to_type else "Unknown"
+                
+                # Create edge type label (alphabetically sorted for consistency)
+                edge_type = f"{min(source_type, target_type)}-{max(source_type, target_type)}"
+                
+                if math.isfinite(importance):
+                    edge_type_importance[edge_type].append(importance)
+                    edge_type_counts[edge_type] += 1
+    
+    # Calculate statistics for each edge type
+    edge_type_stats = {}
+    print("Edge Type Importance Statistics:")
+    
+    for edge_type in sorted(edge_type_importance.keys(), 
+                           key=lambda x: np.mean(edge_type_importance[x]), 
+                           reverse=True):
+        scores = edge_type_importance[edge_type]
+        
+        mean_score = np.mean(scores)
+        median_score = np.median(scores)
+        std_score = np.std(scores)
+        max_score = np.max(scores)
+        min_score = np.min(scores)
+        count = len(scores)
+        
+        edge_type_stats[edge_type] = {
+            'mean': mean_score,
+            'median': median_score,
+            'std': std_score,
+            'max': max_score,
+            'min': min_score,
+            'count': count
+        }
+        
+        print(f"  {edge_type}: mean={mean_score:.4f}, median={median_score:.4f}, "
+              f"count={count}, range=[{min_score:.4f}, {max_score:.4f}]")
+    
+    # Identify most important edge types
+    if edge_type_stats:
+        top_edge_type = max(edge_type_stats.items(), key=lambda x: x[1]['mean'])
+        print(f"\nMost important edge type: {top_edge_type[0]} (mean importance: {top_edge_type[1]['mean']:.4f})")
+    
+    return {
+        'edge_type_stats': edge_type_stats,
+        'edge_type_counts': dict(edge_type_counts)
+    }
 
 
 def real_faithfulness_test(explanations_dict, model, graph, n_tests=50):
@@ -642,22 +942,17 @@ def create_node_type_mapping(graph):
 def main():
     """Main function."""
     parser = argparse.ArgumentParser(description='GNN Explainer for drug-disease predictions')
-    parser.add_argument('--graph', type=str, required=True, help='Path to graph file (.pt)')
-    parser.add_argument('--model', type=str, required=True, help='Path to trained model (.pt)')
-    parser.add_argument('--predictions', type=str, required=True, help='Path to FP predictions (CSV or PT)')
+    parser.add_argument('--graph', type=str, help='Path to graph file (.pt)')
+    parser.add_argument('--model', type=str, help='Path to trained model (.pt)')
+    parser.add_argument('--predictions', type=str, help='Path to FP predictions (CSV or PT)')
     parser.add_argument('--output-dir', type=str, default='results/explainer/', help='Output directory')
     parser.add_argument('--max-explanations', type=int, default=1000, help='Maximum explanations to generate')
-    parser.add_argument('--config', type=str, help='Path to config JSON file')
+    parser.add_argument('--mappings-dir', type=str, help='Path to directory containing drug/disease mappings')
     
     args = parser.parse_args()
     
-    # Load configuration
-    if args.config and os.path.exists(args.config):
-        with open(args.config, 'r') as f:
-            config_dict = json.load(f)
-        config = create_custom_config(**config_dict)
-    else:
-        config = get_config()
+    # Load configuration from config.py
+    config = get_config()
     
     explainer_config = config.get_explainer_config()
     
@@ -668,100 +963,193 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    # Load graph
-    print(f"Loading graph from {args.graph}")
-    graph = torch.load(args.graph, map_location=device)
-    print(f"Loaded graph: {graph.x.size(0)} nodes, {graph.edge_index.size(1)} edges")
+    # Initialize MLflow tracking
+    tracker = ExperimentTracker(
+        experiment_name="GNN_Explainer_Analysis",
+        tracking_uri="./mlruns"
+    )
     
-    # Detect model type and load
-    model_path = Path(args.model)
-    model_filename = model_path.name.lower()
+    # Start MLflow run (not as context manager)
+    tracker.start_run(run_name=f"explainer_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}")
     
-    if 'gcn' in model_filename:
-        model_class = GCNModel
-        model_name = 'GCN'
-    elif 'transformer' in model_filename:
-        model_class = TransformerModel
-        model_name = 'Transformer'
-    elif 'sage' in model_filename:
-        model_class = SAGEModel
-        model_name = 'SAGE'
-    else:
-        print(f"Warning: Cannot detect model type from {model_filename}, defaulting to TransformerModel")
-        model_class = TransformerModel
-        model_name = 'Transformer'
+    try:
+        # Log parameters
+        tracker.log_param('graph_path', args.graph)
+        tracker.log_param('model_path', args.model)
+        tracker.log_param('predictions_path', args.predictions)
+        tracker.log_param('max_explanations', args.max_explanations)
+        tracker.log_param('explainer_epochs', explainer_config.get('epochs', 50))
+        tracker.log_param('device', str(device))
+        
+        # Load graph
+        if args.graph:
+            graph_path = args.graph
+        else:
+            graph_path = find_latest_graph()
+        
+        print(f"Loading graph from {graph_path}")
+        graph = torch.load(graph_path, map_location=device, weights_only=False)
+        print(f"Loaded graph: {graph.x.size(0)} nodes, {graph.edge_index.size(1)} edges")
+        
+        tracker.log_param('num_nodes', graph.x.size(0))
+        tracker.log_param('num_edges', graph.edge_index.size(1))
+        tracker.log_param('num_features', graph.x.size(1))
+        
+        # Detect model type and load
+        if args.model:
+            model_path = args.model
+        else:
+            model_path = find_latest_model()
+        
+        model_filename = Path(model_path).name.lower()
+        
+        if 'gcn' in model_filename:
+            model_class = GCNModel
+            model_name = 'GCN'
+        elif 'transformer' in model_filename:
+            model_class = TransformerModel
+            model_name = 'Transformer'
+        elif 'sage' in model_filename:
+            model_class = SAGEModel
+            model_name = 'SAGE'
+        else:
+            print(f"Warning: Cannot detect model type from {model_filename}, defaulting to TransformerModel")
+            model_class = TransformerModel
+            model_name = 'Transformer'
+        
+        print(f"Loading {model_name} model from {model_path}")
+        tracker.log_param('model_type', model_name)
+        
+        # Get model configuration from config
+        model_config = config.get_model_config()
+        
+        model = model_class(
+            in_channels=graph.x.size(1),
+            hidden_channels=model_config['hidden_channels'],
+            out_channels=model_config['out_channels'],
+            num_layers=model_config['num_layers'],
+            dropout_rate=model_config['dropout_rate']
+        ).to(device)
+        
+        model.load_state_dict(torch.load(model_path, map_location=device, weights_only=False))
+        model.eval()
+        print("Model loaded successfully")
+        
+        # Load FP predictions with proper mappings
+        mappings_dir = args.mappings_dir
+        if not mappings_dir:
+            # Try to auto-detect mappings directory relative to workspace
+            workspace_root = Path(__file__).parent.parent
+            potential_mappings_dir = workspace_root / "processed_data" / "mappings"
+            if potential_mappings_dir.exists():
+                mappings_dir = str(potential_mappings_dir)
+                print(f"Auto-detected mappings directory: {mappings_dir}")
+            else:
+                print("Warning: Could not auto-detect mappings directory")
+        
+        if args.predictions:
+            predictions_path = args.predictions
+        else:
+            predictions_path = find_latest_predictions()
+        
+        fp_pairs = load_fp_predictions(predictions_path, mappings_dir=mappings_dir)
+        print(f"Loaded {len(fp_pairs)} false positive predictions")
+        tracker.log_metric('num_fp_predictions', len(fp_pairs))
+        
+        # Initialize GNNExplainer
+        print("Initializing GNNExplainer...")
+        analyzer = GNNExplainerAnalyzer(model, graph, device, config=explainer_config)
+        
+        # Generate explanations
+        start_time = time.time()
+        explanations_dict = analyzer.explain_multiple_predictions(
+            fp_pairs, 
+            max_explanations=args.max_explanations
+        )
+        explanation_time = time.time() - start_time
+        
+        tracker.log_metric('explanation_time_seconds', explanation_time)
+        tracker.log_metric('explanations_per_second', len(explanations_dict) / explanation_time if explanation_time > 0 else 0)
+        
+        # Create node type mapping (simplified - in practice use actual mappings)
+        idx_to_type = create_node_type_mapping(graph)
+        
+        # Run analysis
+        hub_bias_results = calculate_hub_bias_analysis(explanations_dict, graph, idx_to_type)
+        type_importance_results = calculate_type_importance_analysis(explanations_dict, graph, idx_to_type)
+        edge_type_results = analyze_edge_types(explanations_dict, graph, idx_to_type)
+        faithfulness_results = real_faithfulness_test(explanations_dict, model, graph, n_tests=50)
+        
+        # Compile results
+        results = {
+            'config': explainer_config,
+            'n_explanations': len(explanations_dict),
+            'n_successful': len([e for e in explanations_dict.values() if e['has_explanation']]),
+            'hub_bias_results': hub_bias_results,
+            'type_importance_results': type_importance_results,
+            'edge_type_results': edge_type_results,
+            'faithfulness_results': faithfulness_results,
+            'timestamp': dt.datetime.now().isoformat()
+        }
+        
+        # Log key metrics to MLflow
+        tracker.log_metric('n_explanations', results['n_explanations'])
+        tracker.log_metric('n_successful_explanations', results['n_successful'])
+        tracker.log_metric('success_rate', results['n_successful'] / results['n_explanations'] if results['n_explanations'] > 0 else 0)
+        
+        # Log hub bias metrics
+        if hub_bias_results and 'correlation' in hub_bias_results and math.isfinite(hub_bias_results['correlation']):
+            tracker.log_metric('hub_bias_correlation', hub_bias_results['correlation'])
+            tracker.log_metric('hub_bias_p_value', hub_bias_results['p_value'])
+            tracker.log_metric('hub_bias_n_nodes', hub_bias_results['n_nodes'])
+        
+        # Log faithfulness metrics
+        if faithfulness_results and 'p_value' in faithfulness_results:
+            tracker.log_metric('faithfulness_p_value', faithfulness_results['p_value'])
+            if len(faithfulness_results['attributed_drops']) > 0:
+                tracker.log_metric('mean_attributed_drop', np.mean(faithfulness_results['attributed_drops']))
+                tracker.log_metric('mean_random_drop', np.mean(faithfulness_results['random_drops']))
+        
+        # Log node type importance
+        if type_importance_results and 'node_type_stats' in type_importance_results:
+            for node_type, stats in type_importance_results['node_type_stats'].items():
+                tracker.log_metric(f'node_importance_{node_type}_mean', stats['mean'])
+                tracker.log_metric(f'node_importance_{node_type}_count', stats['count'])
+        
+        # Log edge type importance
+        if edge_type_results and 'edge_type_stats' in edge_type_results:
+            for edge_type, stats in edge_type_results['edge_type_stats'].items():
+                safe_edge_type = edge_type.replace('-', '_')
+                tracker.log_metric(f'edge_importance_{safe_edge_type}_mean', stats['mean'])
+                tracker.log_metric(f'edge_importance_{safe_edge_type}_count', stats['count'])
+        
+        # Save and visualize
+        create_visualizations(results, args.output_dir)
+        save_results(results, args.output_dir)
+        
+        # Log visualizations as artifacts
+        output_path = Path(args.output_dir)
+        if (output_path / 'hub_bias_analysis.png').exists():
+            tracker.log_artifact(str(output_path / 'hub_bias_analysis.png'))
+        if (output_path / 'faithfulness_test.png').exists():
+            tracker.log_artifact(str(output_path / 'faithfulness_test.png'))
+        
+        # Log results JSON as artifact
+        results_files = list(output_path.glob('gnn_explainer_results_*.json'))
+        if results_files:
+            tracker.log_artifact(str(results_files[-1]))
+        
+        print("\n" + "="*60)
+        print("EXPLAINER ANALYSIS COMPLETE")
+        print("="*60)
+        print(f"Total explanations: {results['n_explanations']}")
+        print(f"Successful: {results['n_successful']}")
+        print(f"Results saved to: {args.output_dir}")
+        print(f"MLflow run completed")
     
-    print(f"Loading {model_name} model from {args.model}")
-    model = model_class(
-        in_channels=graph.x.size(1),
-        hidden_channels=16,
-        out_channels=16,
-        num_layers=2,
-        dropout_rate=0.5
-    ).to(device)
-    
-    model.load_state_dict(torch.load(args.model, map_location=device))
-    model.eval()
-    print("Model loaded successfully")
-    
-    # Load FP predictions
-    fp_pairs = load_fp_predictions(args.predictions)
-    
-    # Initialize explainer
-    print("Initializing GNNExplainer...")
-    explainer = GNNExplainerAnalyzer(model, graph, device, explainer_config)
-    
-    # Generate explanations
-    print("Generating explanations...")
-    explanations = explainer.explain_multiple_predictions(fp_pairs, args.max_explanations)
-    
-    successful_pairs = len([e for e in explanations.values() if e['has_explanation']])
-    if successful_pairs == 0:
-        print("Error: No successful explanations generated")
-        return None
-    
-    print(f"Generated {successful_pairs} successful explanations")
-    
-    # Create node type mapping
-    idx_to_type = create_node_type_mapping(graph)
-    
-    # Run analyses
-    print("\n" + "="*50)
-    print("RUNNING EXPLAINER VALIDATION ANALYSES")
-    print("="*50)
-    
-    # 1. Hub bias analysis
-    hub_bias_results = calculate_hub_bias_analysis(explanations, graph, idx_to_type)
-    
-    # 2. Type importance analysis
-    type_importance_results = calculate_type_importance_analysis(explanations, graph, idx_to_type)
-    
-    # 3. Faithfulness test
-    faithfulness_results = real_faithfulness_test(explanations, model, graph)
-    
-    # Store results
-    results = {
-        'explanations': explanations,
-        'hub_bias_results': hub_bias_results,
-        'type_importance_results': type_importance_results,
-        'faithfulness_results': faithfulness_results,
-        'model_name': model_name,
-        'config': explainer_config,
-        'successful_explanations': successful_pairs,
-        'total_predictions': len(fp_pairs)
-    }
-    
-    # Create visualizations and save results
-    create_visualizations(results, args.output_dir)
-    save_results(results, args.output_dir)
-    
-    print(f"\nGNNExplainer analysis completed!")
-    print(f"Results saved to: {args.output_dir}")
-    print(f"Successful explanations: {successful_pairs}/{len(fp_pairs)}")
-    print(f"Hub bias correlation: {hub_bias_results.get('correlation', 'N/A'):.3f}")
-    print(f"Faithfulness p-value: {faithfulness_results.get('p_value', 'N/A'):.3f}")
-    
-    return results
+    finally:
+        # Always end the run, even if there's an error
+        tracker.end_run()
 
 
 if __name__ == "__main__":

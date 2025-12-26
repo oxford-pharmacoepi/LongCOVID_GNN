@@ -1,0 +1,7 @@
+version: '3'
+
+tasks:
+  long-covid:
+    desc: "Run Long COVID drug repurposing analysis"
+    cmds:
+      - uv run long_covid_drug_repurposing.py --top-k 10

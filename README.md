@@ -26,7 +26,7 @@ drug_disease_prediction/
 │   ├── __init__.py               # Package initialization
 │   ├── models.py                 # GNN model definitions (GCN, GraphSAGE, Transformer)
 │   ├── utils.py                  # Utility functions and evaluation metrics
-│   ├── config.py                 # Configuration management
+│   ├── config.py                 # Configuration management (main config file)
 │   └── data_processing.py        # Data loading & preprocessing
 │
 ├── scripts/                      # Main pipeline scripts
@@ -38,7 +38,6 @@ drug_disease_prediction/
 ├── processed_data/               # Pre-processed data files
 ├── run_pipeline.py               # Main pipeline orchestrator
 ├── requirements.txt              # Python dependencies
-├── config.json                   # Configuration file
 └── README.md                     # This file
 ```
 
@@ -190,7 +189,7 @@ raw_data/
 - Large datasets may require significant download time and storage space
 - Check OpenTargets license terms before using the data
 
-After downloading, you'll need to update your `config.json` to point to the raw data directory and run the full processing pipeline.
+After downloading, you'll need to update your `src/config.py` to point to the raw data directory and run the full processing pipeline.
 
 ---
 
@@ -218,17 +217,35 @@ python scripts/4_explain_predictions.py
 
 ## Configuration
 
-Create a `config.json` file:
+All configuration is managed through `src/config.py`. Edit this file to customize:
 
-```json
-{
-  "training_version": 21.06,
-  "validation_version": 23.06,
-  "test_version": 24.06,
-  "as_dataset": "associationByOverallDirect",
-  "negative_sampling_approach": "random",
-  "processed_path": "processed_data/"
-}
+- **Data versions**: Training (21.06), Validation (23.06), Test (24.06)
+- **Model parameters**: Hidden channels, number of layers, dropout rates
+- **Training settings**: Learning rate, epochs, batch sizes
+- **Negative sampling**: Sampling strategies and ratios
+- **Data paths**: Processed data directory location
+
+Example configuration in `src/config.py`:
+
+```python
+class Config:
+    # Data versions
+    TRAINING_VERSION = "21.06"
+    VALIDATION_VERSION = "23.06"
+    TEST_VERSION = "24.06"
+    
+    # Paths
+    PROCESSED_PATH = "processed_data/"
+    
+    # Model parameters
+    HIDDEN_CHANNELS = 128
+    NUM_LAYERS = 3
+    DROPOUT_RATE = 0.2
+    
+    # Training parameters
+    LEARNING_RATE = 0.001
+    EPOCHS = 100
+    BATCH_SIZE = 1024
 ```
 
 ## Models

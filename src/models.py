@@ -32,6 +32,9 @@ class GCNModel(torch.nn.Module):
         self.final_layer = torch.nn.Linear(hidden_channels, out_channels)
 
     def forward(self, x, edge_index):
+        # Ensure input tensor is float32
+        x = x.float()
+        
         # First GCNConv layer
         x = self.conv1(x, edge_index)
         x = self.ln(x)
@@ -74,6 +77,9 @@ class TransformerModel(torch.nn.Module):
         self.final_layer = torch.nn.Linear(hidden_channels, out_channels)
 
     def forward(self, x, edge_index):
+        # Ensure input tensor is float32
+        x = x.float()
+        
         # First TransformerConv layer
         x = self.conv1(x, edge_index)
         x = self.ln(x)
@@ -116,6 +122,9 @@ class SAGEModel(torch.nn.Module):
         self.final_layer = torch.nn.Linear(hidden_channels, out_channels)
 
     def forward(self, x, edge_index):
+        # Ensure input tensor is float32
+        x = x.float()
+        
         # First layer
         x = self.conv1(x, edge_index)
         x = self.ln(x)

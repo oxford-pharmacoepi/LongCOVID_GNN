@@ -135,37 +135,78 @@ dmypy.json
 # Cython debug symbols
 cython_debug/
 
-# PyTorch model files
+# ============================================
+# PROJECT-SPECIFIC: DO NOT COMMIT
+# ============================================
+
+# PyTorch model files (large binary files)
 *.pt
 *.pth
+
+# Pickle files (can be regenerated)
 *.pkl
 *.pickle
 
-# Data directories
+# Raw data (large, can be downloaded)
+raw_data/*
 data/raw/
+OpenTargets_datasets/
+
+# Processed data (can be regenerated from raw)
+processed_data/
 data/processed/
 !data/sample/
-processed_data/*
 
-# Results and outputs
+# Results and model outputs (generated files)
 results/
 outputs/
 logs/
-runs/
-experiments/
-checkpoints/
-
-# Specific to this project
-OpenTargets_datasets/
 test_results*/
 *_results/
 
-# Large files
+# Report files (LaTeX build artifacts and PDFs)
+report/*.aux
+report/*.log
+report/*.out
+report/*.pdf
+report/*.tex
+
+# MLflow experiment tracking (local runs)
+mlruns/
+mlflow_logs/
+
+# Weights & Biases
+wandb/
+
+# TensorBoard logs
+tensorboard_logs/
+tb_logs/
+
+# Hydra outputs
+outputs/
+.hydra/
+hydra/
+
+# Large data files
 *.parquet
-*.csv
-*.xlsx
 *.h5
 *.hdf5
+
+# CSV/JSON outputs (regenerated)
+results/*.csv
+results/*.json
+processed_data/**/*.csv
+processed_data/**/*.json
+
+# Analysis outputs
+analyze_graphs.py
+cleanup_duplicates.py
+
+# Temporary experiment files
+temp/
+tmp/
+*.tmp
+*.temp
 
 # IDE files
 .vscode/
@@ -183,28 +224,27 @@ test_results*/
 ehthumbs.db
 Thumbs.db
 
-# Temporary files
-*.tmp
-*.temp
-temp/
-tmp/
-
-# Configuration files (keep examples but ignore actual configs)
+# Configuration files (keep templates, ignore local configs)
 config_local.json
 config_production.json
 secrets.json
 
-# Weights & Biases
-wandb/
+# ============================================
+# EXCEPTIONS: DO COMMIT THESE
+# ============================================
+# Keep small example/test data
+!data/sample/*.csv
+!data/example/*.json
 
-# TensorBoard logs
-tensorboard_logs/
-tb_logs/
+# Keep configuration templates
+!config.json
+!config_template.json
 
-# MLflow
-mlruns/
+# Keep small reference files
+!gwas_genes_long_covid.txt
+!long_covid_disease_therapeutic_edge.csv
 
-# Hydra
-outputs/
-.hydra/
-hydra/
+# KGBench datasets and documentation
+data/KGBench*
+report/
+LONG_COVID_EXPLANATION.md

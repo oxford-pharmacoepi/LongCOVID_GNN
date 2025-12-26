@@ -17,26 +17,78 @@ import json
 import os
 from pathlib import Path
 from tqdm import tqdm
+import glob
 
 # Import from shared modules
 from src.models import GCNModel, TransformerModel, SAGEModel, MODEL_CLASSES
 from src.utils import set_seed, enable_full_reproducibility, calculate_metrics, generate_pairs
 from src.config import get_config, create_custom_config
+from src.mlflow_tracker import ExperimentTracker
+
+
+def find_latest_graph(results_dir='results'):
+    """Auto-detect the latest graph file."""
+    graph_patterns = [
+        os.path.join(results_dir, 'graph_*.pt'),
+        'graph_*.pt',
+        os.path.join('data', 'processed', '*.pt'),
+    ]
+    
+    graph_files = []
+    for pattern in graph_patterns:
+        graph_files.extend(glob.glob(pattern))
+    
+    if not graph_files:
+        raise FileNotFoundError("No graph files found. Please create a graph first using script 1_create_graph.py")
+    
+    # Sort by modification time (most recent first)
+    latest_graph = max(graph_files, key=os.path.getmtime)
+    print(f"Auto-detected latest graph: {latest_graph}")
+    return latest_graph
 
 
 class ModelTrainer:
     """Comprehensive model trainer with early stopping and validation."""
     
-    def __init__(self, config):
+    def __init__(self, config, tracker=None):
         self.config = config
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model_config = config.get_model_config()
+        self.tracker = tracker
         
         print(f"Using device: {self.device}")
         
     def prepare_training_data(self, graph):
-        """Prepare positive and negative edges for training."""
-        print("Preparing training data...")
+        """Prepare positive and negative edges for training from actual graph data."""
+        print("Preparing training data from actual graph edges...")
+        
+        # Use the validation and test data that's already in the graph
+        if hasattr(graph, 'val_edge_index') and hasattr(graph, 'val_edge_label'):
+            print("Found validation data in graph")
+            val_edge_tensor = graph.val_edge_index
+            val_label_tensor = graph.val_edge_label
+            
+            # Split validation data into positive and negative training edges
+            pos_mask = val_label_tensor == 1
+            neg_mask = val_label_tensor == 0
+            
+            pos_edge_index = val_edge_tensor[pos_mask].T
+            neg_edge_index = val_edge_tensor[neg_mask].T
+            
+            print(f"Extracted {pos_edge_index.size(1)} positive drug-disease edges")
+            print(f"Extracted {neg_edge_index.size(1)} negative drug-disease edges")
+            
+            return pos_edge_index, neg_edge_index
+        
+        else:
+            print("ERROR: No validation data found in graph!")
+            print("This means the graph creation didn't work properly")
+            # Fall back to old synthetic method as last resort
+            return self.prepare_training_data_synthetic(graph)
+    
+    def prepare_training_data_synthetic(self, graph):
+        """OLD SYNTHETIC METHOD - should not be used!"""
+        print("WARNING: Using synthetic training data - this will give poor results!")
         
         # Extract positive edges from graph metadata
         if hasattr(graph, 'metadata') and 'edge_info' in graph.metadata:
@@ -93,6 +145,13 @@ class ModelTrainer:
         print(f"\nTraining {model_name}")
         print("-" * 50)
         
+        # Log model-specific parameters to MLflow
+        if self.tracker:
+            self.tracker.log_param(f"{model_name}_architecture", model_class.__name__)
+            self.tracker.log_param(f"{model_name}_hidden_channels", self.model_config['hidden_channels'])
+            self.tracker.log_param(f"{model_name}_num_layers", self.model_config['num_layers'])
+            self.tracker.log_param(f"{model_name}_dropout", self.model_config['dropout_rate'])
+        
         # Initialize model
         model = model_class(
             in_channels=graph.x.size(1),
@@ -102,7 +161,11 @@ class ModelTrainer:
             dropout_rate=self.model_config['dropout_rate']
         ).to(self.device)
         
-        optimizer = torch.optim.Adam(model.parameters(), lr=self.model_config['learning_rate'])
+        optimizer = torch.optim.Adam(
+            model.parameters(), 
+            lr=self.model_config['learning_rate'],
+            weight_decay=self.model_config.get('weight_decay', 0.0)
+        )
         loss_function = torch.nn.BCEWithLogitsLoss()
         
         # Move data to device
@@ -151,6 +214,10 @@ class ModelTrainer:
             
             train_losses.append(loss.item())
             
+            # Log to MLflow (every 10 epochs to avoid clutter)
+            if self.tracker and epoch % 10 == 0:
+                self.tracker.log_training_metrics(epoch, loss.item())
+            
             # Validation phase (every 5 epochs)
             if epoch % 5 == 0:
                 model.eval()
@@ -171,6 +238,15 @@ class ModelTrainer:
                     
                     val_losses.append(val_loss.item())
                     val_aucs.append(val_auc)
+                    
+                    # Log validation metrics to MLflow
+                    if self.tracker:
+                        self.tracker.log_training_metrics(
+                            epoch, 
+                            loss.item(), 
+                            val_loss.item(), 
+                            {'auc': val_auc, 'threshold': val_threshold}
+                        )
                     
                     # Check for improvement
                     if val_auc > best_val_auc:
@@ -193,7 +269,7 @@ class ModelTrainer:
                         break
         
         # Load best model for final evaluation
-        model.load_state_dict(torch.load(model_path))
+        model.load_state_dict(torch.load(model_path, weights_only=False))
         model.eval()
         
         # Final validation
@@ -212,6 +288,19 @@ class ModelTrainer:
         
         # Create training plots
         self._create_training_plots(model_name, train_losses, val_losses, val_aucs, results_path, timestamp)
+        
+        # Log plots and model to MLflow
+        if self.tracker:
+            plot_path = os.path.join(results_path, f"{model_name}_training_curves_{timestamp}.png")
+            if os.path.exists(plot_path):
+                self.tracker.log_artifact(plot_path, f"training_plots/{model_name}")
+            self.tracker.log_model(model, model_path)
+            
+            # Log final metrics
+            self.tracker.log_metric(f"{model_name}_final_val_auc", best_val_auc)
+            self.tracker.log_metric(f"{model_name}_final_val_loss", best_val_loss)
+            self.tracker.log_metric(f"{model_name}_best_threshold", best_threshold)
+            self.tracker.log_metric(f"{model_name}_total_epochs", len(train_losses))
         
         print(f"Training completed for {model_name}")
         print(f"Best validation AUC: {best_val_auc:.4f}")
@@ -273,11 +362,24 @@ class ModelTrainer:
         print("Loading graph and preparing data...")
         
         # Load graph
-        graph = torch.load(graph_path, map_location=self.device)
+        graph = torch.load(graph_path, map_location=self.device, weights_only=False)
         print(f"Loaded graph: {graph}")
+        
+        # Log graph information to MLflow
+        if self.tracker:
+            self.tracker.log_param("graph_path", graph_path)
+            self.tracker.log_metric("graph_num_nodes", graph.x.size(0))
+            self.tracker.log_metric("graph_num_edges", graph.edge_index.size(1))
+            self.tracker.log_metric("graph_num_features", graph.x.size(1))
         
         # Prepare training data
         pos_edge_index, neg_edge_index = self.prepare_training_data(graph)
+        
+        # Log training data stats
+        if self.tracker:
+            self.tracker.log_metric("train_pos_edges", pos_edge_index.size(1))
+            self.tracker.log_metric("train_neg_edges", neg_edge_index.size(1))
+            self.tracker.log_metric("train_pos_neg_ratio", neg_edge_index.size(1) / pos_edge_index.size(1))
         
         # Extract validation data from graph
         val_edge_tensor = graph.val_edge_index if hasattr(graph, 'val_edge_index') else torch.empty((0, 2), dtype=torch.long)
@@ -339,8 +441,21 @@ class ModelTrainer:
         # Create comparison visualization
         self._create_model_comparison(training_results, results_path)
         
+        # Log comparison plot to MLflow
+        if self.tracker:
+            timestamp = dt.datetime.now().strftime("%Y%m%d%H%M%S")
+            comparison_path = os.path.join(results_path, f"model_comparison_{timestamp}.png")
+            if os.path.exists(comparison_path):
+                self.tracker.log_artifact(comparison_path, "comparison")
+        
         # Save training summary
         self._save_training_summary(training_results, results_path)
+        
+        # Log summary to MLflow
+        if self.tracker:
+            summary_path = os.path.join(results_path, f"training_summary_{timestamp}.json")
+            if os.path.exists(summary_path):
+                self.tracker.log_artifact(summary_path, "summaries")
         
         print(f"\nTraining completed for all models!")
         print(f"Results saved to: {results_path}")
@@ -474,50 +589,83 @@ class ModelTrainer:
 
 def main():
     """Main function."""
-    parser = argparse.ArgumentParser(description='Train drug-disease prediction models')
-    parser.add_argument('graph_path', help='Path to graph file (.pt)')
-    parser.add_argument('--config', type=str, help='Path to config JSON file')
-    parser.add_argument('--results-path', type=str, default='results/models/', help='Results output directory')
-    parser.add_argument('--models', nargs='+', choices=['GCN', 'Transformer', 'SAGE', 'all'], 
-                       default=['all'], help='Models to train')
+    parser = argparse.ArgumentParser(description='Train GNN models for drug-disease prediction')
+    parser.add_argument('--graph', type=str, help='Path to graph file (.pt) - auto-detects latest if not provided')
+    parser.add_argument('--model', type=str, default='all', 
+                       choices=['GCN', 'Transformer', 'SAGE', 'all'],
+                       help='Model architecture to train')
+    parser.add_argument('--epochs', type=int, help='Number of training epochs (overrides config)')
+    parser.add_argument('--output-dir', type=str, default='results/', help='Output directory')
     
     args = parser.parse_args()
     
-    # Create results directory
-    os.makedirs(args.results_path, exist_ok=True)
+    # Auto-detect graph if not provided
+    if not args.graph:
+        args.graph = find_latest_graph(args.output_dir)
     
-    # Load configuration
-    if args.config and os.path.exists(args.config):
-        with open(args.config, 'r') as f:
-            config_dict = json.load(f)
-        config = create_custom_config(**config_dict)
-    else:
-        config = get_config()
+    # Load configuration from config.py (removed --config argument)
+    config = get_config()
+    
+    # Create results directory
+    os.makedirs(args.output_dir, exist_ok=True)
     
     # Set reproducibility
     enable_full_reproducibility(42)
     
-    # Initialize trainer
-    trainer = ModelTrainer(config)
+    # Initialize MLflow tracker
+    tracker = ExperimentTracker(experiment_name='model_training')
+    timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_name = f"training_{timestamp}"
     
-    # Train models
-    training_results = trainer.train_all_models(args.graph_path, args.results_path)
-    
-    if training_results:
-        print("\nTRAINING COMPLETED SUCCESSFULLY!")
-        print("=" * 50)
+    try:
+        tracker.start_run(run_name=run_name)
         
-        # Print summary
-        for model_name, result in training_results.items():
-            print(f"{model_name}: AUC = {result['validation_auc']:.4f}")
+        # Log configuration
+        tracker.log_config(config)
         
-        best_model = max(training_results.items(), key=lambda x: x[1]['validation_auc'])
-        print(f"\nBest model: {best_model[0]} (AUC = {best_model[1]['validation_auc']:.4f})")
+        # Log additional parameters
+        tracker.log_param("graph_path", args.graph)
+        tracker.log_param("output_dir", args.output_dir)
+        tracker.log_param("model_to_train", args.model)
         
-        return training_results
-    else:
-        print("Training failed!")
-        return None
+        # Auto-detect graph if not provided
+        graph_path = args.graph or find_latest_graph()
+        
+        # Initialize trainer
+        trainer = ModelTrainer(config, tracker)
+        
+        # Train models
+        training_results = trainer.train_all_models(graph_path, args.output_dir)
+        
+        if training_results:
+            print("\nTRAINING COMPLETED SUCCESSFULLY!")
+            print("=" * 50)
+            
+            # Print summary
+            for model_name, result in training_results.items():
+                print(f"{model_name}: AUC = {result['validation_auc']:.4f}")
+            
+            best_model = max(training_results.items(), key=lambda x: x[1]['validation_auc'])
+            print(f"\nBest model: {best_model[0]} (AUC = {best_model[1]['validation_auc']:.4f})")
+            
+            # Log best model info
+            tracker.log_param("best_model", best_model[0])
+            tracker.log_metric("best_model_auc", best_model[1]['validation_auc'])
+            
+            print(f"\nMLflow tracking URI: {tracker.experiment_name}")
+            print(f"Run ID: {tracker.run_id}")
+            
+            tracker.end_run()
+            return training_results
+        else:
+            print("Training failed!")
+            tracker.end_run()
+            return None
+            
+    except Exception as e:
+        print(f"Error during training: {e}")
+        tracker.end_run()
+        raise
 
 
 if __name__ == "__main__":
