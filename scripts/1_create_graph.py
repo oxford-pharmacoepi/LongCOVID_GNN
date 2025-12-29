@@ -396,11 +396,13 @@ class GraphBuilder:
             torch.save(self.disease_gene_edges, f"{edge_dir}6_disease_gene_edges.pt")
     
     def create_train_val_test_splits(self):
-        """Create training, validation, and test splits."""
+        """Create training, validation, and test splits with proper negative sampling."""
         print("Creating train/validation/test splits...")
+        print(f"Negative sampling strategy: {self.config.negative_sampling_strategy}")
         print(f"Using negative sampling ratio 1:{self.config.pos_neg_ratio}")
         
         import random 
+        from src.negative_sampling import get_sampler
         
         # Extract training edges
         train_edges_set = set(zip(
@@ -408,35 +410,30 @@ class GraphBuilder:
             self.molecule_disease_edges[1].tolist()
         ))
         
+        # Get drug and disease node lists
+        drug_nodes = list(self.mappings['drug_key_mapping'].values())
+        disease_nodes = list(self.mappings['disease_key_mapping'].values())
+        
+        # Generate all possible drug-disease pairs for negative sampling
+        from src.utils import generate_pairs
+        all_possible_pairs = generate_pairs(
+            self.mappings['approved_drugs_list'],
+            self.mappings['disease_list'],
+            self.mappings['drug_key_mapping'],
+            self.mappings['disease_key_mapping']
+        )
+        
         # Generate validation and test splits using temporal data
         try:
             new_val_edges_set, new_test_edges_set = self.processor.generate_validation_test_splits(
                 self.config, self.mappings, train_edges_set
             )
             
-            # Generate all possible pairs for negative sampling
-            from src.utils import generate_pairs
-            all_pairs = generate_pairs(
-                self.mappings['approved_drugs_list'],
-                self.mappings['disease_list'],
-                self.mappings['drug_key_mapping'],
-                self.mappings['disease_key_mapping']
-            )
-            
         except Exception as e:
             print(f"Warning: Could not generate temporal splits: {e}")
             print("Creating synthetic splits...")
             
-            # Fallback: create synthetic splits
-            from src.utils import generate_pairs
-            all_pairs = generate_pairs(
-                self.mappings['approved_drugs_list'],
-                self.mappings['disease_list'],
-                self.mappings['drug_key_mapping'],
-                self.mappings['disease_key_mapping']
-            )
-            
-            not_linked = list(set(all_pairs) - train_edges_set)
+            not_linked = list(set(all_possible_pairs) - train_edges_set)
             
             # Sample validation and test edges
             random.seed(42)
@@ -447,32 +444,85 @@ class GraphBuilder:
             remaining_not_linked = list(set(not_linked) - new_val_edges_set)
             new_test_edges_set = set(random.sample(remaining_not_linked, test_size))
         
-        # Create validation tensors with configurable negative ratio
+        # Initialize the negative sampler based on config
+        print(f"\nInitializing {self.config.negative_sampling_strategy} negative sampler...")
+        
+        if self.config.negative_sampling_strategy == 'hard':
+            sampler = get_sampler(
+                'hard',
+                min_common_neighbors=self.config.neg_sampling_params.get('min_common_neighbors', 1),
+                seed=self.config.seed
+            )
+        elif self.config.negative_sampling_strategy == 'mixed':
+            sampler = get_sampler(
+                'mixed',
+                strategy_weights=self.config.neg_sampling_params.get('strategy_weights', {
+                    'hard': 0.6, 'degree_matched': 0.3, 'random': 0.1
+                }),
+                min_common_neighbors=self.config.neg_sampling_params.get('min_common_neighbors', 1),
+                degree_tolerance=self.config.neg_sampling_params.get('degree_tolerance', 0.3),
+                similarity_threshold=self.config.neg_sampling_params.get('similarity_threshold', 0.5),
+                seed=self.config.seed
+            )
+        elif self.config.negative_sampling_strategy == 'degree_matched':
+            sampler = get_sampler(
+                'degree_matched',
+                degree_tolerance=self.config.neg_sampling_params.get('degree_tolerance', 0.3),
+                seed=self.config.seed
+            )
+        elif self.config.negative_sampling_strategy == 'feature_similar':
+            sampler = get_sampler(
+                'feature_similar',
+                similarity_threshold=self.config.neg_sampling_params.get('similarity_threshold', 0.5),
+                seed=self.config.seed
+            )
+        else:  # 'random' or default
+            sampler = get_sampler('random', seed=self.config.seed)
+        
+        # Sample VALIDATION negatives
+        print("\n" + "="*80)
+        print("SAMPLING VALIDATION NEGATIVES")
+        print("="*80)
         val_true_pairs = list(new_val_edges_set)
         num_val_negatives = len(val_true_pairs) * self.config.pos_neg_ratio
-        val_false_pairs = random.sample(
-            list(set(all_pairs) - train_edges_set - new_val_edges_set), 
-            num_val_negatives
+        
+        val_false_pairs = sampler.sample(
+            positive_edges=train_edges_set | new_val_edges_set | new_test_edges_set,
+            all_possible_pairs=all_possible_pairs,
+            num_samples=num_val_negatives,
+            edge_index=self.all_edge_index,
+            node_features=self.all_features
         )
         
         val_labels = [1] * len(val_true_pairs) + [0] * len(val_false_pairs)
         self.val_edge_tensor = torch.tensor(val_true_pairs + val_false_pairs, dtype=torch.long)
         self.val_label_tensor = torch.tensor(val_labels, dtype=torch.long)
         
-        # Create test tensors with configurable negative ratio
+        # Sample TEST negatives
+        print("\n" + "="*80)
+        print("SAMPLING TEST NEGATIVES")
+        print("="*80)
         test_true_pairs = list(new_test_edges_set)
         num_test_negatives = len(test_true_pairs) * self.config.pos_neg_ratio
-        test_false_pairs = random.sample(
-            list(set(all_pairs) - train_edges_set - new_val_edges_set - new_test_edges_set),
-            num_test_negatives
+        
+        test_false_pairs = sampler.sample(
+            positive_edges=train_edges_set | new_val_edges_set | new_test_edges_set,
+            all_possible_pairs=all_possible_pairs,
+            num_samples=num_test_negatives,
+            edge_index=self.all_edge_index,
+            node_features=self.all_features
         )
         
         test_labels = [1] * len(test_true_pairs) + [0] * len(test_false_pairs)
         self.test_edge_tensor = torch.tensor(test_true_pairs + test_false_pairs, dtype=torch.long)
         self.test_label_tensor = torch.tensor(test_labels, dtype=torch.long)
         
-        print(f"Validation: {len(val_true_pairs)} positive, {len(val_false_pairs)} negative (1:{self.config.pos_neg_ratio})")
-        print(f"Test: {len(test_true_pairs)} positive, {len(test_false_pairs)} negative (1:{self.config.pos_neg_ratio})")
+        print("\n" + "="*80)
+        print("SPLIT SUMMARY")
+        print("="*80)
+        print(f"Validation: {len(val_true_pairs)} positive, {len(val_false_pairs)} negative (ratio 1:{self.config.pos_neg_ratio})")
+        print(f"Test: {len(test_true_pairs)} positive, {len(test_false_pairs)} negative (ratio 1:{self.config.pos_neg_ratio})")
+        print("="*80 + "\n")
     
     def build_graph(self):
         """Build the final graph object."""
@@ -501,7 +551,17 @@ class GraphBuilder:
             "node_info": node_info,
             "edge_info": edge_info,
             "data_mode": self.data_mode,
-            "config": self.config.__dict__,
+            "graph_creation_config": {
+                # Only store config relevant to graph creation
+                "training_version": self.config.training_version,
+                "validation_version": self.config.validation_version,
+                "test_version": self.config.test_version,
+                "negative_sampling_strategy": self.config.negative_sampling_strategy,
+                "pos_neg_ratio": self.config.pos_neg_ratio,
+                "neg_sampling_params": self.config.neg_sampling_params,
+                "network_config": self.config.network_config,
+                "seed": self.config.seed,
+            },
             "creation_timestamp": dt.datetime.now().isoformat(),
             "total_nodes": sum(node_info.values()),
             "total_edges": sum(edge_info.values())
@@ -545,7 +605,7 @@ def main():
         config.update_paths(results=args.output_dir)
     
     # Set reproducibility
-    enable_full_reproducibility(42)
+    enable_full_reproducibility(config.seed)  # Use config.seed instead of hardcoded 42
     
     # Initialize MLflow tracker
     tracker = ExperimentTracker(experiment_name=args.experiment_name)

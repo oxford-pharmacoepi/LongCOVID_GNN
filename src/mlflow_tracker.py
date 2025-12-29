@@ -16,7 +16,7 @@ class ExperimentTracker:
     
     def __init__(self, experiment_name="drug_disease_prediction", tracking_uri="file:./mlruns"):
         """
-        Initialize MLflow experiment tracker.
+        Initialise MLflow experiment tracker.
         
         Args:
             experiment_name: Name of the MLflow experiment
@@ -50,8 +50,33 @@ class ExperimentTracker:
         
         # Log dataset settings
         mlflow.log_param("as_dataset", config.as_dataset)
-        mlflow.log_param("negative_sampling_approach", config.negative_sampling_approach)
+        
+        # Log negative sampling configuration (NEW)
+        mlflow.log_param("negative_sampling_strategy", config.negative_sampling_strategy)
         mlflow.log_param("pos_neg_ratio", config.pos_neg_ratio)
+        if hasattr(config, 'eval_pos_neg_ratio'):
+            mlflow.log_param("eval_pos_neg_ratio", config.eval_pos_neg_ratio)
+        
+        # Log negative sampling parameters (NEW)
+        if hasattr(config, 'neg_sampling_params'):
+            for key, value in config.neg_sampling_params.items():
+                if isinstance(value, dict):
+                    # Handle nested dict (e.g., strategy_weights)
+                    for sub_key, sub_value in value.items():
+                        mlflow.log_param(f"neg_sampling_{key}_{sub_key}", sub_value)
+                else:
+                    mlflow.log_param(f"neg_sampling_{key}", value)
+        
+        # Log loss function configuration (NEW)
+        mlflow.log_param("loss_function", config.loss_function)
+        if hasattr(config, 'loss_params'):
+            for key, value in config.loss_params.items():
+                if value is not None:
+                    mlflow.log_param(f"loss_{key}", value)
+        
+        # Log primary metric (NEW)
+        if hasattr(config, 'primary_metric'):
+            mlflow.log_param("primary_metric", config.primary_metric)
         
         # Log model hyperparameters
         for key, value in config.model_config.items():
@@ -307,7 +332,7 @@ class ExperimentTracker:
         
         Args:
             experiment_name: Name of the experiment
-            metric: Metric to optimize
+            metric: Metric to optimise
         
         Returns:
             Best run info

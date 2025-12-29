@@ -145,12 +145,17 @@ class ModelTrainer:
         print(f"\nTraining {model_name}")
         print("-" * 50)
         
+        # Get primary metric from config
+        primary_metric = self.config.primary_metric if hasattr(self.config, 'primary_metric') else 'auc'
+        print(f"Using {primary_metric.upper()} as primary metric for model selection")
+        
         # Log model-specific parameters to MLflow
         if self.tracker:
             self.tracker.log_param(f"{model_name}_architecture", model_class.__name__)
             self.tracker.log_param(f"{model_name}_hidden_channels", self.model_config['hidden_channels'])
             self.tracker.log_param(f"{model_name}_num_layers", self.model_config['num_layers'])
             self.tracker.log_param(f"{model_name}_dropout", self.model_config['dropout_rate'])
+            self.tracker.log_param(f"{model_name}_primary_metric", primary_metric)
         
         # Initialize model
         model = model_class(
@@ -166,7 +171,23 @@ class ModelTrainer:
             lr=self.model_config['learning_rate'],
             weight_decay=self.model_config.get('weight_decay', 0.0)
         )
-        loss_function = torch.nn.BCEWithLogitsLoss()
+        
+        # Get loss function from config (NEW!)
+        from src.custom_losses import get_loss_function
+        loss_config = self.config.get_loss_config()
+        loss_function = get_loss_function(
+            loss_type=loss_config['loss_function'],
+            **loss_config['params']
+        )
+        
+        print(f"Using loss function: {loss_config['loss_function']}")
+        
+        # Log loss function to MLflow
+        if self.tracker:
+            self.tracker.log_param(f"{model_name}_loss_function", loss_config['loss_function'])
+            for key, value in loss_config['params'].items():
+                if value is not None:
+                    self.tracker.log_param(f"{model_name}_loss_{key}", value)
         
         # Move data to device
         graph = graph.to(self.device)
@@ -175,14 +196,14 @@ class ModelTrainer:
         val_edge_tensor = val_edge_tensor.to(self.device)
         val_label_tensor = val_label_tensor.to(self.device)
         
-        # Training tracking
+        # Training tracking - track both loss and primary metric
         best_val_loss = float('inf')
-        best_val_auc = 0.0
+        best_val_metric = 0.0  # For AUC, APR, F1, etc. (higher is better)
         counter = 0
         best_threshold = 0.5
         train_losses = []
         val_losses = []
-        val_aucs = []
+        val_metrics_history = []  # Track primary metric over time
         
         # Create models directory and set model save path
         models_dir = os.path.join(results_path, 'models')
@@ -204,10 +225,13 @@ class ModelTrainer:
             pos_scores = (z[pos_edge_index[0]] * z[pos_edge_index[1]]).sum(dim=-1)
             neg_scores = (z[neg_edge_index[0]] * z[neg_edge_index[1]]).sum(dim=-1)
             
-            # Compute loss
-            pos_loss = F.binary_cross_entropy_with_logits(pos_scores, torch.ones_like(pos_scores))
-            neg_loss = F.binary_cross_entropy_with_logits(neg_scores, torch.zeros_like(neg_scores))
-            loss = pos_loss + neg_loss
+            # Compute loss using the custom loss function
+            all_scores = torch.cat([pos_scores, neg_scores])
+            all_labels = torch.cat([
+                torch.ones_like(pos_scores),
+                torch.zeros_like(neg_scores)
+            ])
+            loss = loss_function(all_scores, all_labels)
             
             # Backpropagation
             loss.backward()
@@ -229,17 +253,21 @@ class ModelTrainer:
                     val_loss = loss_function(val_scores, val_label_tensor.float())
                     val_probs = torch.sigmoid(val_scores)
                     
-                    # Calculate validation AUC
-                    from sklearn.metrics import roc_auc_score
-                    try:
-                        val_auc = roc_auc_score(val_label_tensor.cpu().numpy(), val_probs.cpu().numpy())
-                    except ValueError:
-                        val_auc = 0.5  # Default if calculation fails
+                    # Calculate validation metrics
+                    val_preds = (val_probs >= 0.5).float()
+                    val_metrics = calculate_metrics(
+                        val_label_tensor.cpu().numpy(),
+                        val_probs.cpu().numpy(),
+                        val_preds.cpu().numpy()
+                    )
+                    
+                    # Get the primary metric value
+                    current_metric = val_metrics.get(primary_metric, 0.0)
                     
                     val_threshold = val_probs.mean().item()
                     
                     val_losses.append(val_loss.item())
-                    val_aucs.append(val_auc)
+                    val_metrics_history.append(current_metric)
                     
                     # Log validation metrics to MLflow
                     if self.tracker:
@@ -247,13 +275,13 @@ class ModelTrainer:
                             epoch, 
                             loss.item(), 
                             val_loss.item(), 
-                            {'auc': val_auc, 'threshold': val_threshold}
+                            {primary_metric: current_metric, 'threshold': val_threshold}
                         )
                     
-                    # Check for improvement
-                    if val_auc > best_val_auc:
+                    # Check for improvement based on primary metric
+                    if current_metric > best_val_metric:
                         best_val_loss = val_loss.item()
-                        best_val_auc = val_auc
+                        best_val_metric = current_metric
                         best_threshold = val_threshold
                         counter = 0
                         
@@ -261,7 +289,7 @@ class ModelTrainer:
                         torch.save(model.state_dict(), model_path)
                         
                         if epoch % 50 == 0:
-                            print(f"Epoch {epoch+1}: New best AUC: {best_val_auc:.4f}, Loss: {best_val_loss:.4f}")
+                            print(f"Epoch {epoch+1}: New best {primary_metric.upper()}: {best_val_metric:.4f}, Loss: {best_val_loss:.4f}")
                     else:
                         counter += 1
                     
@@ -274,7 +302,7 @@ class ModelTrainer:
         model.load_state_dict(torch.load(model_path, weights_only=False))
         model.eval()
         
-        # Final validation
+        # Final validation with comprehensive metrics
         with torch.no_grad():
             z = model(graph.x.float(), graph.edge_index)
             val_scores = (z[val_edge_tensor[:, 0]] * z[val_edge_tensor[:, 1]]).sum(dim=-1)
@@ -289,7 +317,8 @@ class ModelTrainer:
             )
         
         # Create training plots
-        self._create_training_plots(model_name, train_losses, val_losses, val_aucs, results_path, timestamp)
+        self._create_training_plots(model_name, train_losses, val_losses, val_metrics_history, 
+                                    results_path, timestamp, primary_metric)
         
         # Log plots and model to MLflow
         if self.tracker:
@@ -299,29 +328,31 @@ class ModelTrainer:
             self.tracker.log_model(model, model_path)
             
             # Log final metrics
-            self.tracker.log_metric(f"{model_name}_final_val_auc", best_val_auc)
+            self.tracker.log_metric(f"{model_name}_final_val_{primary_metric}", best_val_metric)
             self.tracker.log_metric(f"{model_name}_final_val_loss", best_val_loss)
             self.tracker.log_metric(f"{model_name}_best_threshold", best_threshold)
             self.tracker.log_metric(f"{model_name}_total_epochs", len(train_losses))
         
         print(f"Training completed for {model_name}")
-        print(f"Best validation AUC: {best_val_auc:.4f}")
+        print(f"Best validation {primary_metric.upper()}: {best_val_metric:.4f}")
         print(f"Model saved to: {model_path}")
         
         return {
             'model_path': model_path,
             'model_class': model_class,
             'threshold': best_threshold,
-            'validation_auc': best_val_auc,
+            'validation_metric': best_val_metric,  # Changed from validation_auc
             'validation_metrics': metrics,
+            'primary_metric': primary_metric,  # Store which metric was used
             'training_history': {
                 'train_losses': train_losses,
                 'val_losses': val_losses,
-                'val_aucs': val_aucs
+                'val_metrics': val_metrics_history  # Changed from val_aucs
             }
         }
     
-    def _create_training_plots(self, model_name, train_losses, val_losses, val_aucs, results_path, timestamp):
+    def _create_training_plots(self, model_name, train_losses, val_losses, val_metrics, 
+                              results_path, timestamp, metric_name='auc'):
         """Create training visualization plots."""
         
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
@@ -343,11 +374,11 @@ class ModelTrainer:
         axes[1].legend()
         axes[1].grid(True, alpha=0.3)
         
-        # Validation AUC
-        axes[2].plot(val_epochs, val_aucs, label='Validation AUC', color='green')
+        # Validation primary metric
+        axes[2].plot(val_epochs, val_metrics, label=f'Validation {metric_name.upper()}', color='green')
         axes[2].set_xlabel('Epoch')
-        axes[2].set_ylabel('AUC')
-        axes[2].set_title(f'{model_name} - Validation AUC')
+        axes[2].set_ylabel(metric_name.upper())
+        axes[2].set_title(f'{model_name} - Validation {metric_name.upper()}')
         axes[2].legend()
         axes[2].grid(True, alpha=0.3)
         
@@ -533,7 +564,7 @@ class ModelTrainer:
             summary_data['model_results'][model_name] = {
                 'model_path': result['model_path'],
                 'threshold': result['threshold'],
-                'validation_auc': result['validation_auc'],
+                'validation_metric': result['validation_metric'],
                 'validation_metrics': result['validation_metrics']
             }
         
@@ -564,7 +595,7 @@ class ModelTrainer:
                 f.write(f"\n{model_name}:\n")
                 f.write(f"  Model Path: {result['model_path']}\n")
                 f.write(f"  Threshold: {result['threshold']:.4f}\n")
-                f.write(f"  Validation AUC: {result['validation_auc']:.4f}\n")
+                f.write(f"  Validation Metric ({result['primary_metric']}): {result['validation_metric']:.4f}\n")
                 
                 if 'validation_metrics' in result:
                     metrics = result['validation_metrics']
@@ -577,13 +608,13 @@ class ModelTrainer:
                     f.write(f"    Recall: {metrics.get('recall', 0):.4f}\n")
             
             # Model ranking
-            f.write(f"\nMODEL RANKING BY VALIDATION AUC:\n")
+            f.write(f"\nMODEL RANKING BY VALIDATION {self.config.primary_metric.upper()}:\n")
             f.write("-" * 40 + "\n")
             
             sorted_models = sorted(training_results.items(), 
-                                 key=lambda x: x[1]['validation_auc'], reverse=True)
+                                 key=lambda x: x[1]['validation_metric'], reverse=True)
             for i, (model_name, result) in enumerate(sorted_models):
-                f.write(f"{i+1}. {model_name}: {result['validation_auc']:.4f}\n")
+                f.write(f"{i+1}. {model_name}: {result['validation_metric']:.4f}\n")
         
         print(f"Training summary saved to: {summary_path}")
         print(f"Training report saved to: {report_path}")
@@ -605,14 +636,29 @@ def main():
     if not args.graph:
         args.graph = find_latest_graph(args.output_dir)
     
-    # Load configuration from config.py (removed --config argument)
+    # FORCE RELOAD CONFIG MODULE TO PICK UP ANY CHANGES
+    import importlib
+    import src.config
+    importlib.reload(src.config)
+    
+    # Load configuration from config.py (freshly reloaded)
     config = get_config()
+    
+    # Print config to verify it's correct
+    print("\n" + "="*60)
+    print("CONFIGURATION LOADED:")
+    print("="*60)
+    print(f"Loss function: {config.loss_function}")
+    print(f"Primary metric: {config.primary_metric}")
+    print(f"Negative sampling strategy: {config.negative_sampling_strategy}")
+    print(f"Pos:Neg ratio: 1:{config.pos_neg_ratio}")
+    print("="*60 + "\n")
     
     # Create results directory
     os.makedirs(args.output_dir, exist_ok=True)
     
     # Set reproducibility
-    enable_full_reproducibility(42)
+    enable_full_reproducibility(config.seed)  # Use config.seed instead of hardcoded 42
     
     # Initialize MLflow tracker
     tracker = ExperimentTracker(experiment_name='model_training')
@@ -645,14 +691,14 @@ def main():
             
             # Print summary
             for model_name, result in training_results.items():
-                print(f"{model_name}: AUC = {result['validation_auc']:.4f}")
+                print(f"{model_name}: {result['primary_metric'].upper()} = {result['validation_metric']:.4f}")
             
-            best_model = max(training_results.items(), key=lambda x: x[1]['validation_auc'])
-            print(f"\nBest model: {best_model[0]} (AUC = {best_model[1]['validation_auc']:.4f})")
+            best_model = max(training_results.items(), key=lambda x: x[1]['validation_metric'])
+            print(f"\nBest model: {best_model[0]} ({best_model[1]['primary_metric'].upper()} = {best_model[1]['validation_metric']:.4f})")
             
             # Log best model info
             tracker.log_param("best_model", best_model[0])
-            tracker.log_metric("best_model_auc", best_model[1]['validation_auc'])
+            tracker.log_metric(f"best_model_{best_model[1]['primary_metric']}", best_model[1]['validation_metric'])
             
             print(f"\nMLflow tracking URI: {tracker.experiment_name}")
             print(f"Run ID: {tracker.run_id}")

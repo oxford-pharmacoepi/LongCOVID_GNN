@@ -18,9 +18,36 @@ class Config:
         
         # Dataset settings
         self.as_dataset = 'associationByOverallDirect'
-        self.negative_sampling_approach = 'random'
-        self.pos_neg_ratio = 1  # Ratio of positive to negative samples (1:1, 1:10, 1:100)
         
+        # Negative sampling configuration
+        self.negative_sampling_strategy = 'mixed'  # Options: 'random', 'hard', 'degree_matched', 'feature_similar', 'mixed'
+        self.pos_neg_ratio = 10  # Ratio of negative to positive samples (1:x)
+        self.neg_sampling_params = {
+            'min_common_neighbors': 1,      # The higher, the harder the negatives
+            'degree_tolerance': 0.3,         # For degree-matched sampling
+            'similarity_threshold': 0.5,     # For feature-similarity sampling
+            'strategy_weights': {            # For mixed strategy
+                'hard': 0.6,
+                'degree_matched': 0.3,
+                'random': 0.1
+            }
+        }
+        
+        # Loss function configuration
+        self.loss_function = 'standard_bce'  # Options: standard_bce (default), weighted_bce, focal, pu, confidence_weighted, balanced_focal
+        self.loss_params = {
+            'pos_weight': None,              # Auto-computed if None
+            'neg_weight': 1.0,
+            'alpha': 0.25,                   # For focal loss
+            'gamma': 2.0,                    # For focal loss
+            'prior': 0.01,                   # For PU learning (1% of negatives might be hidden positives)
+            'min_neg_weight': 0.1,           # For confidence-weighted loss
+            'max_neg_weight': 1.0            # For confidence-weighted loss
+        }
+        
+        # Evaluation settings
+        self.primary_metric = 'apr'  # "auc", "apr", "f1", "accuracy"
+
         # Model hyperparameters
         self.model_config = {
             'learning_rate': 0.001,
@@ -118,6 +145,21 @@ class Config:
         """Get explainer configuration dictionary."""
         return self.explainer_config.copy()
     
+    def get_negative_sampling_config(self):
+        """Get negative sampling configuration."""
+        return {
+            'strategy': self.negative_sampling_strategy,
+            'pos_neg_ratio': self.pos_neg_ratio,
+            'params': self.neg_sampling_params.copy()
+        }
+    
+    def get_loss_config(self):
+        """Get loss function configuration."""
+        return {
+            'loss_function': self.loss_function,
+            'params': self.loss_params.copy()
+        }
+    
     def get_all_paths(self):
         """Get all configured paths."""
         return self.paths.copy()
@@ -144,13 +186,21 @@ def create_custom_config(**kwargs):
     if 'explainer_config' in kwargs:
         config.explainer_config.update(kwargs['explainer_config'])
     
+    # Update negative sampling config
+    if 'neg_sampling_params' in kwargs:
+        config.neg_sampling_params.update(kwargs['neg_sampling_params'])
+    
+    # Update loss config
+    if 'loss_params' in kwargs:
+        config.loss_params.update(kwargs['loss_params'])
+    
     # Update paths
     if 'paths' in kwargs:
         config.update_paths(**kwargs['paths'])
     
     # Update other settings
     for key, value in kwargs.items():
-        if key not in ['model_config', 'explainer_config', 'paths'] and hasattr(config, key):
+        if key not in ['model_config', 'explainer_config', 'paths', 'neg_sampling_params', 'loss_params'] and hasattr(config, key):
             setattr(config, key, value)
     
     return config
