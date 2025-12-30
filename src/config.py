@@ -20,10 +20,10 @@ class Config:
         self.as_dataset = 'associationByOverallDirect'
         
         # Negative sampling configuration
-        self.negative_sampling_strategy = 'mixed'  # Options: 'random', 'hard', 'degree_matched', 'feature_similar', 'mixed'
+        self.negative_sampling_strategy = 'hard'  # Options: 'random', 'hard', 'degree_matched', 'feature_similar', 'mixed'
         self.pos_neg_ratio = 10  # Ratio of negative to positive samples (1:x)
         self.neg_sampling_params = {
-            'min_common_neighbors': 1,      # The higher, the harder the negatives
+            'min_common_neighbors': 7,      # The higher, the harder the negatives
             'degree_tolerance': 0.3,         # For degree-matched sampling
             'similarity_threshold': 0.5,     # For feature-similarity sampling
             'strategy_weights': {            # For mixed strategy
@@ -34,7 +34,7 @@ class Config:
         }
         
         # Loss function configuration
-        self.loss_function = 'standard_bce'  # Options: standard_bce (default), weighted_bce, focal, pu, confidence_weighted, balanced_focal
+        self.loss_function = 'balanced_focal'  # Options: standard_bce (default), weighted_bce, focal, pu, confidence_weighted, balanced_focal
         self.loss_params = {
             'pos_weight': None,              # Auto-computed if None
             'neg_weight': 1.0,
@@ -47,6 +47,9 @@ class Config:
         
         # Evaluation settings
         self.primary_metric = 'apr'  # "auc", "apr", "f1", "accuracy"
+        
+        # Model selection (NEW!)
+        self.model_choice = 'Transformer'  # Options: 'all', 'Transformer', 'GCN', 'SAGE'
 
         # Model hyperparameters
         self.model_config = {

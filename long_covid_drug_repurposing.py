@@ -365,21 +365,54 @@ class LongCOVIDDrugRepurposing:
         print(f"\nPredicting top {top_k} drug candidates for Long COVID...")
         
         with torch.no_grad():
-            # Get node embeddings from model
+            # Get node embeddings from model (same as training)
             embeddings = self.model(self.graph.x, self.graph.edge_index)
+            
+            # DIAGNOSTIC: Check embedding statistics
+            print(f"\nEMBEDDING DIAGNOSTICS:")
+            print(f"  Embedding shape: {embeddings.shape}")
+            print(f"  Embedding mean: {embeddings.mean():.4f}")
+            print(f"  Embedding std: {embeddings.std():.4f}")
+            print(f"  Embedding min: {embeddings.min():.4f}")
+            print(f"  Embedding max: {embeddings.max():.4f}")
             
             # Get Long COVID embedding
             long_covid_embedding = embeddings[self.long_covid_idx]
+            print(f"\n  Long COVID embedding mean: {long_covid_embedding.mean():.4f}")
+            print(f"  Long COVID embedding std: {long_covid_embedding.std():.4f}")
             
             # Get drug embeddings (first N nodes are drugs)
             num_drugs = len(self.drug_mapping)
             drug_embeddings = embeddings[:num_drugs]
             
-            # Calculate similarity scores (dot product)
-            scores = torch.matmul(drug_embeddings, long_covid_embedding)
+            print(f"\n  Drug embeddings mean: {drug_embeddings.mean():.4f}")
+            print(f"  Drug embeddings std: {drug_embeddings.std():.4f}")
             
-            # Apply sigmoid to get probabilities
-            probabilities = torch.sigmoid(scores)
+            # IMPORTANT: Use the SAME edge prediction as during training
+            # Edge score = dot product of embeddings (element-wise multiply then sum)
+            edge_scores = (drug_embeddings * long_covid_embedding).sum(dim=-1)
+            
+            # Apply sigmoid to get probability of edge existing (just like training)
+            probabilities = torch.sigmoid(edge_scores)
+            
+            # DIAGNOSTIC: Show score distribution across ALL drugs
+            print(f"\nEDGE SCORE DISTRIBUTION (across all {num_drugs} drugs):")
+            percentiles = [0, 10, 25, 50, 75, 90, 95, 99, 100]
+            percentile_values = torch.quantile(edge_scores, torch.tensor([p/100 for p in percentiles]))
+            for p, val in zip(percentiles, percentile_values):
+                prob = torch.sigmoid(val)
+                print(f"  {p:3d}th percentile: edge_score={val:7.4f} -> prob={prob:.4f}")
+            
+            print(f"\nPROBABILITY DISTRIBUTION:")
+            prob_percentile_values = torch.quantile(probabilities, torch.tensor([p/100 for p in percentiles]))
+            for p, val in zip(percentiles, prob_percentile_values):
+                print(f"  {p:3d}th percentile: prob={val:.4f}")
+            
+            # Check if embeddings are actually different (variance check)
+            embedding_variance = drug_embeddings.var(dim=0).mean()
+            print(f"\n  Average variance across embedding dimensions: {embedding_variance:.6f}")
+            if embedding_variance < 0.01:
+                print("  ⚠️  WARNING: Very low variance! Embeddings may have collapsed.")
             
             # Get top-k predictions
             top_probs, top_indices = torch.topk(probabilities, min(top_k, len(probabilities)))
@@ -397,19 +430,18 @@ class LongCOVIDDrugRepurposing:
                     'drug_id': drug_id,
                     'drug_name': drug_name,
                     'probability': float(prob),
-                    'score': float(scores[idx].cpu()),
+                    'edge_score': float(edge_scores[idx].cpu()),
                     'confidence': 'High' if prob > 0.7 else 'Medium' if prob > 0.5 else 'Low'
                 })
             
             df = pd.DataFrame(results)
             
-            print(f"  Generated {len(df)} predictions")
             print(f"\nTop 10 Drug Candidates:")
             print("=" * 80)
             
             for _, row in df.head(10).iterrows():
                 print(f"{row['rank']:2d}. {row['drug_name']}")
-                print(f"    Probability: {row['probability']:.4f} | Score: {row['score']:.4f} | Confidence: {row['confidence']}")
+                print(f"    Probability: {row['probability']:.4f} | Edge Score: {row['edge_score']:.4f} | Confidence: {row['confidence']}")
                 print(f"    ID: {row['drug_id']}")
                 print()
             

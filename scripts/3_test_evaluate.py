@@ -110,9 +110,16 @@ class ModelEvaluator:
         print(f"Results directory structure created under: {self.results_path}")
         return result_dirs
         
-    def load_trained_models_info(self, models_path):
-        """Load information about trained models."""
+    def load_trained_models_info(self, models_path, config=None):
+        """Load information about trained models, respecting model_choice config."""
         trained_models = {}
+        
+        # Get model_choice from config if available
+        model_choice = None
+        if config:
+            model_choice = getattr(config, 'model_choice', None)
+            if model_choice:
+                print(f"Config specifies model_choice: {model_choice}")
         
         # Look for model files
         if os.path.isfile(models_path):
@@ -153,11 +160,26 @@ class ModelEvaluator:
                 print("Skipping this file.")
                 continue
             
+            # Check if this model matches model_choice (if specified)
+            if model_choice:
+                # Normalize model_choice to match model_name format
+                if model_choice.lower() == 'gcn' and model_name != 'GCNModel':
+                    continue
+                elif model_choice.lower() == 'transformer' and model_name != 'TransformerModel':
+                    continue
+                elif model_choice.lower() == 'sage' and model_name != 'SAGEModel':
+                    continue
+            
             trained_models[model_name] = {
                 'model_path': model_file,
                 'model_class': model_class,
                 'threshold': 0.5  # Default threshold
             }
+        
+        if model_choice and not trained_models:
+            print(f"Warning: model_choice '{model_choice}' specified but no matching model found in {models_dir}")
+        elif model_choice:
+            print(f"Loading only {list(trained_models.keys())} as specified by model_choice")
         
         return trained_models
         
@@ -869,7 +891,7 @@ def main():
     print(f"Loaded graph: {graph}")
     
     # Load trained models information
-    trained_models_info = evaluator.load_trained_models_info(args.models_path)
+    trained_models_info = evaluator.load_trained_models_info(args.models_path, config=config)
     
     if not trained_models_info:
         print("No trained models found! Please train models first.")

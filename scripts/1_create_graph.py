@@ -435,8 +435,8 @@ class GraphBuilder:
             
             not_linked = list(set(all_possible_pairs) - train_edges_set)
             
-            # Sample validation and test edges
-            random.seed(42)
+            # Sample validation and test edges using config seed
+            random.seed(self.config.seed)
             val_size = min(len(train_edges_set) // 10, len(not_linked) // 2)
             test_size = min(len(train_edges_set) // 10, len(not_linked) - val_size)
             
@@ -450,30 +450,28 @@ class GraphBuilder:
         if self.config.negative_sampling_strategy == 'hard':
             sampler = get_sampler(
                 'hard',
-                min_common_neighbors=self.config.neg_sampling_params.get('min_common_neighbors', 1),
+                min_common_neighbors=self.config.neg_sampling_params['min_common_neighbors'],
                 seed=self.config.seed
             )
         elif self.config.negative_sampling_strategy == 'mixed':
             sampler = get_sampler(
                 'mixed',
-                strategy_weights=self.config.neg_sampling_params.get('strategy_weights', {
-                    'hard': 0.6, 'degree_matched': 0.3, 'random': 0.1
-                }),
-                min_common_neighbors=self.config.neg_sampling_params.get('min_common_neighbors', 1),
-                degree_tolerance=self.config.neg_sampling_params.get('degree_tolerance', 0.3),
-                similarity_threshold=self.config.neg_sampling_params.get('similarity_threshold', 0.5),
+                strategy_weights=self.config.neg_sampling_params['strategy_weights'],
+                min_common_neighbors=self.config.neg_sampling_params['min_common_neighbors'],
+                degree_tolerance=self.config.neg_sampling_params['degree_tolerance'],
+                similarity_threshold=self.config.neg_sampling_params['similarity_threshold'],
                 seed=self.config.seed
             )
         elif self.config.negative_sampling_strategy == 'degree_matched':
             sampler = get_sampler(
                 'degree_matched',
-                degree_tolerance=self.config.neg_sampling_params.get('degree_tolerance', 0.3),
+                degree_tolerance=self.config.neg_sampling_params['degree_tolerance'],
                 seed=self.config.seed
             )
         elif self.config.negative_sampling_strategy == 'feature_similar':
             sampler = get_sampler(
                 'feature_similar',
-                similarity_threshold=self.config.neg_sampling_params.get('similarity_threshold', 0.5),
+                similarity_threshold=self.config.neg_sampling_params['similarity_threshold'],
                 seed=self.config.seed
             )
         else:  # 'random' or default

@@ -166,9 +166,15 @@ class ModelTrainer:
             dropout_rate=self.model_config['dropout_rate']
         ).to(self.device)
         
+        # Use lower learning rate for SAGE model (more stable)
+        lr = self.model_config['learning_rate']
+        if model_name == 'SAGEModel':
+            lr = lr * 0.1  # 10x lower learning rate for SAGE
+            print(f"Using reduced learning rate for SAGE: {lr:.6f}")
+        
         optimizer = torch.optim.Adam(
             model.parameters(), 
-            lr=self.model_config['learning_rate'],
+            lr=lr,
             weight_decay=self.model_config.get('weight_decay', 0.0)
         )
         
@@ -435,12 +441,31 @@ class ModelTrainer:
         
         print(f"Validation set: {val_edge_tensor.size(0)} samples")
         
-        # Models to train
-        models_to_train = {
+        # Models to train - UPDATED to support single model selection
+        all_models = {
             'GCNModel': GCNModel,
             'TransformerModel': TransformerModel,
             'SAGEModel': SAGEModel
         }
+        
+        # Determine which models to train based on --model argument
+        if hasattr(self.config, 'model_choice') and self.config.model_choice != 'all':
+            model_choice = self.config.model_choice
+            # Map simple names to full names
+            model_map = {
+                'GCN': 'GCNModel',
+                'Transformer': 'TransformerModel',
+                'SAGE': 'SAGEModel',
+                'GCNModel': 'GCNModel',
+                'TransformerModel': 'TransformerModel',
+                'SAGEModel': 'SAGEModel'
+            }
+            model_name = model_map.get(model_choice, 'TransformerModel')
+            models_to_train = {model_name: all_models[model_name]}
+            print(f"\n🎯 Training only {model_name} (as specified)")
+        else:
+            models_to_train = all_models
+            print(f"\n🎯 Training all {len(models_to_train)} models")
         
         # Train all models
         training_results = {}
