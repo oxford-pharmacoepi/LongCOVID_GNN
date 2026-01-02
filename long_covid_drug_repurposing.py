@@ -942,7 +942,8 @@ Note: Drug name lookup uses ChEMBL API and can be slow for many drugs.
     args = parser.parse_args()
     
     # Set random seed for reproducibility
-    enable_full_reproducibility(42)
+    config = get_config()
+    enable_full_reproducibility(config.seed)
     
     # Determine visualisation flag
     visualise = args.visualise and not args.no_visualise
