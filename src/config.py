@@ -21,9 +21,9 @@ class Config:
         
         # Negative sampling configuration
         self.negative_sampling_strategy = 'hard'  # Options: 'random', 'hard', 'degree_matched', 'feature_similar', 'mixed'
-        self.pos_neg_ratio = 10  # Ratio of negative to positive samples (1:x)
+        self.pos_neg_ratio = 10  # Ratio of negative to positive samples for val/test (1:x)
+        self.train_neg_ratio = 10  # Ratio for training (1:x)
         self.neg_sampling_params = {
-            'min_common_neighbors': 7,      # The higher, the harder the negatives
             'degree_tolerance': 0.3,         # For degree-matched sampling
             'similarity_threshold': 0.5,     # For feature-similarity sampling
             'strategy_weights': {            # For mixed strategy
@@ -34,7 +34,7 @@ class Config:
         }
         
         # Loss function configuration
-        self.loss_function = 'balanced_focal'  # Options: standard_bce (default), weighted_bce, focal, pu, confidence_weighted, balanced_focal
+        self.loss_function = 'standard_bce'  # Options: standard_bce (default), weighted_bce, focal, pu, confidence_weighted, balanced_focal
         self.loss_params = {
             'pos_weight': None,              # Auto-computed if None
             'neg_weight': 1.0,
@@ -48,7 +48,7 @@ class Config:
         # Evaluation settings
         self.primary_metric = 'apr'  # "auc", "apr", "f1", "accuracy"
         
-        # Model selection (NEW!)
+        # Model selection
         self.model_choice = 'Transformer'  # Options: 'all', 'Transformer', 'GCN', 'SAGE'
 
         # Model hyperparameters
@@ -59,7 +59,7 @@ class Config:
             'out_channels': 16,
             'num_layers': 2,
             'dropout_rate': 0.5,
-            'num_epochs': 200,
+            'num_epochs': 500,
             'patience': 10,
             'batch_size': 512,
             'heads': 4,
@@ -153,6 +153,7 @@ class Config:
         return {
             'strategy': self.negative_sampling_strategy,
             'pos_neg_ratio': self.pos_neg_ratio,
+            'train_neg_ratio': self.train_neg_ratio,
             'params': self.neg_sampling_params.copy()
         }
     

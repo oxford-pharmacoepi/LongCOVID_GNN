@@ -957,7 +957,7 @@ def main():
     explainer_config = config.get_explainer_config()
     
     # Set reproducibility
-    enable_full_reproducibility(42)
+    enable_full_reproducibility(config.seed)
     
     # Setup device
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')

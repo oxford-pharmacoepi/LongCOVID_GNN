@@ -59,32 +59,43 @@ class ModelTrainer:
         print(f"Using device: {self.device}")
         
     def prepare_training_data(self, graph):
-        """Prepare positive and negative edges for training from actual graph data."""
-        print("Preparing training data from actual graph edges...")
+        """
+        Extract pre-computed training edges from graph.
         
-        # Use the validation and test data that's already in the graph
-        if hasattr(graph, 'val_edge_index') and hasattr(graph, 'val_edge_label'):
-            print("Found validation data in graph")
-            val_edge_tensor = graph.val_edge_index
-            val_label_tensor = graph.val_edge_label
+        Training edges (with positive and negative samples) are already computed
+        in script 1 using the chosen negative sampling strategy, so we just extract them.
+        """
+        print("Extracting pre-computed training edges from graph...")
+        
+        # Check if graph has pre-computed training edges
+        if hasattr(graph, 'train_edge_index') and hasattr(graph, 'train_edge_label'):
+            train_edge_tensor = graph.train_edge_index
+            train_label_tensor = graph.train_edge_label
             
-            # Split validation data into positive and negative training edges
-            pos_mask = val_label_tensor == 1
-            neg_mask = val_label_tensor == 0
+            # Split into positive and negative edges based on labels
+            pos_mask = train_label_tensor == 1
+            neg_mask = train_label_tensor == 0
             
-            pos_edge_index = val_edge_tensor[pos_mask].T
-            neg_edge_index = val_edge_tensor[neg_mask].T
+            pos_edge_index = train_edge_tensor[pos_mask].T
+            neg_edge_index = train_edge_tensor[neg_mask].T
             
-            print(f"Extracted {pos_edge_index.size(1)} positive drug-disease edges")
-            print(f"Extracted {neg_edge_index.size(1)} negative drug-disease edges")
+            # Get negative sampling strategy from graph metadata
+            neg_strategy = 'unknown'
+            if hasattr(graph, 'metadata') and 'graph_creation_config' in graph.metadata:
+                neg_strategy = graph.metadata['graph_creation_config'].get('negative_sampling_strategy', 'unknown')
+            
+            print(f"✓ Extracted {pos_edge_index.size(1)} positive training edges")
+            print(f"✓ Extracted {neg_edge_index.size(1)} negative training edges")
+            print(f"  Training ratio: 1:{neg_edge_index.size(1) // pos_edge_index.size(1)}")
+            print(f"  Negative sampling strategy: {neg_strategy}")
             
             return pos_edge_index, neg_edge_index
         
         else:
-            print("ERROR: No validation data found in graph!")
-            print("This means the graph creation didn't work properly")
-            # Fall back to old synthetic method as last resort
-            return self.prepare_training_data_synthetic(graph)
+            print("ERROR: No pre-computed training edges found in graph!")
+            print("The graph was created with an old version of script 1.")
+            print("Please regenerate the graph using: python scripts/1_create_graph.py")
+            raise ValueError("Graph must have train_edge_index and train_edge_label attributes")
     
     def prepare_training_data_synthetic(self, graph):
         """OLD SYNTHETIC METHOD - should not be used!"""
@@ -114,7 +125,7 @@ class ModelTrainer:
         pos_edge_index = torch.tensor(pos_edges, dtype=torch.long).T
         print(f"Extracted {pos_edge_index.size(1)} positive drug-disease edges")
         
-        # Generate negative edges
+        # Generate negative edges using seed from config
         all_drug_nodes = list(range(num_drugs))
         all_disease_nodes = list(range(disease_offset, disease_offset + num_diseases))
         
@@ -128,10 +139,10 @@ class ModelTrainer:
         pos_set = set(pos_edges)
         negative_candidates = list(set(all_possible_pairs) - pos_set)
         
-        # Sample negative edges
-        random.seed(42)
+        # Sample negative edges using seed from config
+        rng = random.Random(self.config.seed)
         num_neg_samples = min(len(pos_edges), len(negative_candidates))
-        neg_edges = random.sample(negative_candidates, num_neg_samples)
+        neg_edges = rng.sample(negative_candidates, num_neg_samples)
         neg_edge_index = torch.tensor(neg_edges, dtype=torch.long).T
         
         print(f"Generated {neg_edge_index.size(1)} negative edges")
@@ -157,7 +168,7 @@ class ModelTrainer:
             self.tracker.log_param(f"{model_name}_dropout", self.model_config['dropout_rate'])
             self.tracker.log_param(f"{model_name}_primary_metric", primary_metric)
         
-        # Initialize model
+        # Initialise model
         model = model_class(
             in_channels=graph.x.size(1),
             hidden_channels=self.model_config['hidden_channels'],
@@ -178,7 +189,7 @@ class ModelTrainer:
             weight_decay=self.model_config.get('weight_decay', 0.0)
         )
         
-        # Get loss function from config (NEW!)
+        # Get loss function from config
         from src.custom_losses import get_loss_function
         loss_config = self.config.get_loss_config()
         loss_function = get_loss_function(
@@ -227,7 +238,10 @@ class ModelTrainer:
             # Forward pass
             z = model(graph.x.float(), graph.edge_index)
             
-            # Compute edge scores
+            # Normalise embeddings to unit sphere (prevents saturation)
+            z = F.normalize(z, p=2, dim=1)
+            
+            # Compute edge scores (now bounded to [-1, 1])
             pos_scores = (z[pos_edge_index[0]] * z[pos_edge_index[1]]).sum(dim=-1)
             neg_scores = (z[neg_edge_index[0]] * z[neg_edge_index[1]]).sum(dim=-1)
             
@@ -255,6 +269,10 @@ class ModelTrainer:
                 model.eval()
                 with torch.no_grad():
                     z = model(graph.x.float(), graph.edge_index)
+                    
+                    # Normalise embeddings in validation too
+                    z = F.normalize(z, p=2, dim=1)
+                    
                     val_scores = (z[val_edge_tensor[:, 0]] * z[val_edge_tensor[:, 1]]).sum(dim=-1)
                     val_loss = loss_function(val_scores, val_label_tensor.float())
                     val_probs = torch.sigmoid(val_scores)
@@ -311,6 +329,10 @@ class ModelTrainer:
         # Final validation with comprehensive metrics
         with torch.no_grad():
             z = model(graph.x.float(), graph.edge_index)
+            
+            # Normalise embeddings (must match training validation!)
+            z = F.normalize(z, p=2, dim=1)
+            
             val_scores = (z[val_edge_tensor[:, 0]] * z[val_edge_tensor[:, 1]]).sum(dim=-1)
             val_probs = torch.sigmoid(val_scores)
             val_preds = (val_probs >= best_threshold).float()
@@ -441,7 +463,7 @@ class ModelTrainer:
         
         print(f"Validation set: {val_edge_tensor.size(0)} samples")
         
-        # Models to train - UPDATED to support single model selection
+        # Models to train - supports single model selection
         all_models = {
             'GCNModel': GCNModel,
             'TransformerModel': TransformerModel,
@@ -462,17 +484,18 @@ class ModelTrainer:
             }
             model_name = model_map.get(model_choice, 'TransformerModel')
             models_to_train = {model_name: all_models[model_name]}
-            print(f"\n🎯 Training only {model_name} (as specified)")
+            print(f"\nTraining only {model_name} (as specified)")
         else:
             models_to_train = all_models
-            print(f"\n🎯 Training all {len(models_to_train)} models")
+            print(f"\nTraining all {len(models_to_train)} models")
         
         # Train all models
         training_results = {}
         
         for model_name, model_class in models_to_train.items():
             # Set seed for reproducibility
-            set_seed(42)
+            config = get_config()
+            enable_full_reproducibility(config.seed)
             
             try:
                 result = self.train_single_model(
@@ -496,7 +519,7 @@ class ModelTrainer:
             # Clear GPU memory
             torch.cuda.empty_cache()
         
-        # Create comparison visualization
+        # Create comparison visualisation
         self._create_model_comparison(training_results, results_path)
         
         # Log comparison plot to MLflow
@@ -683,7 +706,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     
     # Set reproducibility
-    enable_full_reproducibility(config.seed)  # Use config.seed instead of hardcoded 42
+    enable_full_reproducibility(config.seed)  
     
     # Initialize MLflow tracker
     tracker = ExperimentTracker(experiment_name='model_training')

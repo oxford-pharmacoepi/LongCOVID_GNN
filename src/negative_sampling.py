@@ -89,21 +89,23 @@ class RandomNegativeSampler(NegativeSampler):
 
 class HardNegativeSampler(NegativeSampler):
     """
-    Hard negative sampling based on common neighbors.
-    Samples negatives that have at least min_cn common neighbors with their endpoints.
-    These are "hard" because they look similar to positives in the graph structure.
+    Hard negative sampling based on common neighbors with random fallback.
+    Ranks all negative candidates by their common neighbor count and selects
+    the top N hardest negatives (highest common neighbors).
+    
+    If not enough hard negatives exist, supplements with random negatives.
     """
     
-    def __init__(self, min_common_neighbors: int = 1, seed: int = 42):
+    def __init__(self, seed: int = 42, fallback_to_random: bool = True):
         """
         Initialise hard negative sampler.
         
         Args:
-            min_common_neighbors: Minimum number of common neighbors required
             seed: Random seed
+            fallback_to_random: If True, supplement with random negatives when hard negatives run out
         """
         super().__init__(seed)
-        self.min_cn = min_common_neighbors
+        self.fallback_to_random = fallback_to_random
     
     def sample(self, 
                positive_edges: Set[Tuple[int, int]], 
@@ -112,7 +114,8 @@ class HardNegativeSampler(NegativeSampler):
                edge_index: Optional[torch.Tensor] = None,
                **kwargs) -> List[Tuple[int, int]]:
         """
-        Sample hard negatives with sufficient common neighbors.
+        Sample the hardest negatives by ranking all candidates by common neighbors.
+        Falls back to random sampling if not enough hard negatives exist.
         
         Args:
             positive_edges: Set of positive edges
@@ -121,13 +124,13 @@ class HardNegativeSampler(NegativeSampler):
             edge_index: Graph edge index for computing common neighbors
             
         Returns:
-            List of hard negative samples
+            List of hard negative samples (supplemented with random if needed)
         """
         
         if edge_index is None:
             raise ValueError("edge_index required for hard negative sampling")
         
-        print(f"Sampling hard negatives (min_cn={self.min_cn})...")
+        print(f"Sampling hard negatives (target: {num_samples:,})...")
         
         # Build adjacency list
         adj_list = defaultdict(set)
@@ -136,32 +139,102 @@ class HardNegativeSampler(NegativeSampler):
             adj_list[src].add(dst)
             adj_list[dst].add(src)
         
-        # Find negative candidates with sufficient common neighbors
-        negative_candidates = []
+        # Compute common neighbors for all negative candidates
         candidate_pool = list(set(all_possible_pairs) - positive_edges)
         
-        # Shuffle for random selection
-        random.shuffle(candidate_pool)
+        print(f"Computing common neighbors for {len(candidate_pool):,} negative candidates...")
+        cn_scores = []
         
-        for src, dst in tqdm(candidate_pool, desc="Finding hard negatives"):
-            if len(negative_candidates) >= num_samples * 2:  # Get extra candidates
-                break
-            
+        for src, dst in tqdm(candidate_pool, desc="Computing common neighbors"):
             # Compute common neighbors
             src_neighbors = adj_list[src]
             dst_neighbors = adj_list[dst]
             common_neighbors = src_neighbors & dst_neighbors
+            cn_count = len(common_neighbors)
             
-            if len(common_neighbors) >= self.min_cn:
-                negative_candidates.append((src, dst))
+            cn_scores.append((cn_count, src, dst))
         
-        # Sample from hard negatives
-        if len(negative_candidates) < num_samples:
-            print(f"Warning: Only found {len(negative_candidates)} hard negatives, "
-                  f"requested {num_samples}. Consider lowering min_cn={self.min_cn}")
-            return negative_candidates
+        # Sort by common neighbor count (descending - hardest first)
+        cn_scores.sort(reverse=True, key=lambda x: x[0])
         
-        return random.sample(negative_candidates, num_samples)
+        # Report statistics
+        if cn_scores:
+            max_cn = cn_scores[0][0]
+            min_cn = cn_scores[-1][0]
+            avg_cn = np.mean([score[0] for score in cn_scores])
+            print(f"\nCommon neighbor statistics:")
+            print(f"  Min: {min_cn}, Max: {max_cn}, Avg: {avg_cn:.2f}")
+            
+            # Show distribution of top candidates
+            top_k = min(10, len(cn_scores))
+            print(f"\nTop {top_k} hardest negatives have CN counts: {[s[0] for s in cn_scores[:top_k]]}")
+            
+            # Print distribution: count how many edges have each CN count
+            from collections import Counter
+            cn_distribution = Counter([score[0] for score in cn_scores])
+            print(f"\nDistribution of edges by common neighbor count:")
+            print(f"{'CN':>5} | {'Count':>8} | {'%':>6}")
+            print("-" * 25)
+            # Sort by CN count (descending) and show top 20
+            for cn_count in sorted(cn_distribution.keys(), reverse=True)[:50]:
+                count = cn_distribution[cn_count]
+                percentage = (count / len(cn_scores)) * 100
+                print(f"{cn_count:5d} | {count:8,d} | {percentage:5.2f}%")
+        
+        # Check if we have enough hard negatives
+        num_available = len(cn_scores)
+        
+        if num_available >= num_samples:
+            # Enough hard negatives available
+            hard_negatives = [(src, dst) for _, src, dst in cn_scores[:num_samples]]
+            
+            # Report the CN range of selected samples
+            selected_cn_min = cn_scores[num_samples - 1][0]
+            selected_cn_max = cn_scores[0][0]
+            
+            print(f"\n✓ Selected {len(hard_negatives):,} hard negatives")
+            print(f"  CN range: [{selected_cn_min} - {selected_cn_max}]")
+            
+            return hard_negatives
+        
+        else:
+            # Not enough hard negatives - need to supplement with random
+            print(f"\n Only {num_available:,} hard negatives available (need {num_samples:,})")
+            
+            if not self.fallback_to_random:
+                print(f"  Fallback disabled - returning all {num_available:,} available hard negatives only")
+                return [(src, dst) for _, src, dst in cn_scores]
+            
+            # Use all hard negatives
+            hard_negatives = [(src, dst) for _, src, dst in cn_scores]
+            num_hard = len(hard_negatives)
+            
+            # Supplement with random negatives
+            deficit = num_samples - num_hard
+            print(f"  Using all {num_hard:,} hard negatives")
+            print(f"  Supplementing with {deficit:,} random negatives")
+            
+            # Get random negatives from remaining candidates (exclude already selected hard negatives)
+            used_negatives = set(hard_negatives)
+            random_candidates = [pair for pair in candidate_pool if pair not in used_negatives]
+            
+            if len(random_candidates) < deficit:
+                print(f"  Warning: Only {len(random_candidates):,} random candidates available")
+                deficit = len(random_candidates)
+            
+            random_negatives = random.sample(random_candidates, deficit)
+            
+            # Combine hard + random
+            all_negatives = hard_negatives + random_negatives
+            
+            # Shuffle to mix hard and random
+            random.shuffle(all_negatives)
+            
+            print(f"\n Selected {len(all_negatives):,} total negatives:")
+            print(f"  - {num_hard:,} hard negatives ({100*num_hard/len(all_negatives):.1f}%)")
+            print(f"  - {len(random_negatives):,} random negatives ({100*len(random_negatives)/len(all_negatives):.1f}%)")
+            
+            return all_negatives
 
 
 class DegreeMatchedNegativeSampler(NegativeSampler):
@@ -346,7 +419,6 @@ class MixedNegativeSampler(NegativeSampler):
     
     def __init__(self, 
                  strategy_weights: Dict[str, float] = None,
-                 min_common_neighbors: int = 1,
                  degree_tolerance: float = 0.3,
                  similarity_threshold: float = 0.5,
                  seed: int = 42):
@@ -356,7 +428,6 @@ class MixedNegativeSampler(NegativeSampler):
         Args:
             strategy_weights: Dict mapping strategy names to their weights
                 Example: {'hard': 0.5, 'degree_matched': 0.3, 'random': 0.2}
-            min_common_neighbors: Passed to HardNegativeSampler
             degree_tolerance: Passed to DegreeMatchedNegativeSampler
             similarity_threshold: Passed to FeatureSimilarityNegativeSampler
             seed: Random seed
@@ -372,9 +443,9 @@ class MixedNegativeSampler(NegativeSampler):
         
         self.strategy_weights = strategy_weights
         
-        # Initialise sub-samplers WITH PARAMETERS FROM CONFIG
+        # Initialise sub-samplers
         self.samplers = {
-            'hard': HardNegativeSampler(min_common_neighbors=min_common_neighbors, seed=seed),
+            'hard': HardNegativeSampler(seed=seed),
             'degree_matched': DegreeMatchedNegativeSampler(degree_tolerance=degree_tolerance, seed=seed),
             'random': RandomNegativeSampler(seed=seed),
             'feature_similar': FeatureSimilarityNegativeSampler(similarity_threshold=similarity_threshold, seed=seed)
@@ -445,17 +516,17 @@ class MixedNegativeSampler(NegativeSampler):
         return all_negatives[:num_samples]
 
 
-def get_sampler(strategy: str = 'mixed', **kwargs) -> NegativeSampler:
+def get_sampler(strategy: str = 'random', **kwargs) -> NegativeSampler:
     """
     Factory function to get a negative sampler.
     
     Args:
         strategy: Name of sampling strategy
-            - 'random': Random sampling (baseline)
+            - 'random': Random sampling (default, baseline)
             - 'hard': Hard negatives with common neighbors
             - 'degree_matched': Degree-matched negatives
             - 'feature_similar': Feature-similar negatives
-            - 'mixed': Mixed strategy (default)
+            - 'mixed': Mixed strategy
         **kwargs: Additional arguments for the sampler
         
     Returns:

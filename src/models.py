@@ -100,7 +100,7 @@ class TransformerModel(torch.nn.Module):
 
 
 class SAGEModel(torch.nn.Module):
-    """GraphSAGE model."""
+    """GraphSAGE model with improved stability."""
     
     def __init__(self, in_channels, hidden_channels, out_channels, num_layers=2, dropout_rate=0.5):
         super(SAGEModel, self).__init__()
@@ -114,12 +114,25 @@ class SAGEModel(torch.nn.Module):
             [SAGEConv(hidden_channels, hidden_channels) for _ in range(num_layers - 1)]
         )
 
-        # Layer normalization and dropout
-        self.ln = torch.nn.LayerNorm(hidden_channels)
+        # Batch normalisation instead of LayerNorm for better stability
+        self.bn = torch.nn.BatchNorm1d(hidden_channels)
         self.dropout = torch.nn.Dropout(p=dropout_rate)
 
-        # Final output layer
+        # Final output layer with proper initialisation
         self.final_layer = torch.nn.Linear(hidden_channels, out_channels)
+        
+        # Initialize weights properly to prevent gradient explosion
+        self._init_weights()
+    
+    def _init_weights(self):
+        """Initialize weights with smaller values for stability."""
+        for conv in [self.conv1] + list(self.conv_list):
+            if hasattr(conv, 'reset_parameters'):
+                conv.reset_parameters()
+        
+        # Initialize final layer with small weights
+        nn.init.xavier_uniform_(self.final_layer.weight, gain=0.1)
+        nn.init.zeros_(self.final_layer.bias)
 
     def forward(self, x, edge_index):
         # Ensure input tensor is float32
@@ -127,14 +140,14 @@ class SAGEModel(torch.nn.Module):
         
         # First layer
         x = self.conv1(x, edge_index)
-        x = self.ln(x)
+        x = self.bn(x)
         x = F.relu(x)
         x = self.dropout(x)
 
         # Additional layers
         for k in range(self.num_layers - 1):
             x = self.conv_list[k](x, edge_index)
-            x = self.ln(x)
+            x = self.bn(x)
             if k < self.num_layers - 2:  # Apply activation and dropout except on the last hidden layer
                 x = F.relu(x)
                 x = self.dropout(x)

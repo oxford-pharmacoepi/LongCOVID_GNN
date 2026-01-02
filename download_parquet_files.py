@@ -163,12 +163,12 @@ def process_directory(parquet_dir):
 
 def main():
     """Main function to download parquet files from all OpenTargets versions."""
-    print("🧬 OpenTargets Parquet File Downloader")
+    print("OpenTargets Parquet File Downloader")
     print("=" * 50)
     
     # Check if raw_data structure exists
     if not Path("raw_data").exists():
-        print("❌ raw_data directory not found!")
+        print("raw_data directory not found!")
         print("Please run create_raw_data_folders.py first to create the directory structure.")
         sys.exit(1)
     
@@ -189,7 +189,7 @@ def main():
                         all_parquet_dirs.append(parquet_dir)
     
     if not all_parquet_dirs:
-        print("❌ No parquet directories with index files found!")
+        print("No parquet directories with index files found!")
         print("Please run create_raw_data_folders.py first to download index files.")
         sys.exit(1)
     
@@ -211,13 +211,13 @@ def main():
     
     # Final summary
     print(f"\n{'='*70}")
-    print(f"🎯 PARQUET DOWNLOAD SUMMARY:")
+    print(f"PARQUET DOWNLOAD SUMMARY:")
     print(f"Total parquet files processed: {total_files}")
     print(f"Successfully downloaded: {total_success}")
     print(f"Failed downloads: {total_files - total_success}")
     
     if total_success == total_files:
-        print("🎉 ALL PARQUET FILES DOWNLOADED SUCCESSFULLY!")
+        print("ALL PARQUET FILES DOWNLOADED SUCCESSFULLY!")
         
         # Restructure data to match expected format
         print("\n🔧 Restructuring data directories...")
@@ -249,20 +249,20 @@ def main():
             print("   ✅ Data restructuring completed!")
             
         except Exception as e:
-            print(f"   ⚠️ Error during restructuring: {e}")
+            print(f"   Error during restructuring: {e}")
             print("   You may need to manually run the restructuring commands:")
             print("   mv raw_data/21.06/parquet/* raw_data/21.06/")
             print("   rmdir raw_data/21.06/parquet")
             print("   (repeat for 23.06 and 24.06)")
         
-        print("\n✅ You now have the complete OpenTargets dataset for:")
+        print("\n You now have the complete OpenTargets dataset for:")
         print("   - 21.06: Full training dataset (indication, molecule, diseases, targets, associations)")
         print("   - 23.06: Validation dataset (indication only)")
         print("   - 24.06: Test dataset (indication only)")
     elif total_success > 0:
-        print("⚠️  Some files downloaded successfully, but some failed")
+        print("Some files downloaded successfully, but some failed")
     else:
-        print("❌ No parquet files were downloaded successfully")
+        print("No parquet files were downloaded successfully")
 
 if __name__ == "__main__":
     # Check if required packages are available

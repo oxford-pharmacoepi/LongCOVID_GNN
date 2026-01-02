@@ -5,6 +5,7 @@ Comprehensive testing with FP export for GNNExplainer analysis.
 """
 
 import torch
+import torch.nn.functional as F
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -53,7 +54,6 @@ def find_latest_graph(results_dir='results'):
 
 def find_latest_models(results_dir='results'):
     """Auto-detect the latest trained models directory or files."""
-    # Only look in the models subdirectory, not in results/ itself
     model_patterns = [
         os.path.join(results_dir, 'models', '*_best_model_*.pt'),
         os.path.join(results_dir, 'models', '*.pt'),
@@ -135,13 +135,19 @@ class ModelEvaluator:
                 if f.endswith('.pt') and 'model' in f.lower() and 'graph' not in f.lower():
                     model_files.append(os.path.join(models_dir, f))
         
-        print(f"Found model files: {[os.path.basename(f) for f in model_files]}")
+        # Sort by modification time to get most recent first
+        model_files.sort(key=os.path.getmtime, reverse=True)
+        
+        print(f"Found {len(model_files)} model files (sorted by recency)")
         
         if not model_files:
             print("Warning: No valid model files found (excluding graph files)")
             return trained_models
         
-        # Create model info dictionary
+        # Track which model types we've already found (to avoid loading old duplicates)
+        found_model_types = set()
+        
+        # Create model info dictionary - only keep the most recent of each type
         for model_file in model_files:
             filename = os.path.basename(model_file)
             
@@ -156,13 +162,15 @@ class ModelEvaluator:
                 model_class = SAGEModel
             else:
                 # Could not determine model type
-                print(f"Warning: Could not detect model type from filename: {filename}")
-                print("Skipping this file.")
+                continue
+            
+            # Skip if we already found this model type
+            if model_name in found_model_types:
                 continue
             
             # Check if this model matches model_choice (if specified)
             if model_choice:
-                # Normalize model_choice to match model_name format
+                # Normalise model_choice to match model_name format
                 if model_choice.lower() == 'gcn' and model_name != 'GCNModel':
                     continue
                 elif model_choice.lower() == 'transformer' and model_name != 'TransformerModel':
@@ -175,11 +183,11 @@ class ModelEvaluator:
                 'model_class': model_class,
                 'threshold': 0.5  # Default threshold
             }
+            found_model_types.add(model_name)
+            print(f"Selected {model_name}: {filename}")
         
         if model_choice and not trained_models:
             print(f"Warning: model_choice '{model_choice}' specified but no matching model found in {models_dir}")
-        elif model_choice:
-            print(f"Loading only {list(trained_models.keys())} as specified by model_choice")
         
         return trained_models
         
@@ -264,6 +272,9 @@ class ModelEvaluator:
         with torch.no_grad():
             z = model(graph.x.float(), graph.edge_index)
             
+            # Normalise embeddings during testing
+            z = F.normalize(z, p=2, dim=1)
+            
             # Process in batches
             for start in range(0, len(test_edge_tensor), batch_size):
                 end = min(start + batch_size, len(test_edge_tensor))
@@ -327,6 +338,12 @@ class ModelEvaluator:
                 results = self.test_single_model(model_info, graph, test_edge_tensor, test_label_tensor, config)
                 test_results[model_name] = results
                 
+                # Add realistic deployment evaluation
+                deployment_metrics = self._evaluate_deployment_scenario(
+                    model_info, graph, config, num_diseases=10
+                )
+                results['deployment_metrics'] = deployment_metrics
+                
                 # Log test metrics to MLflow
                 if self.mlflow_tracker:
                     self._log_metrics_to_mlflow(model_name, results)
@@ -384,6 +401,105 @@ class ModelEvaluator:
                 continue
         
         return test_results
+    
+    def _evaluate_deployment_scenario(self, model_info, graph, config, num_diseases=10, top_k_values=[50, 100, 200]):
+        """
+        Evaluate model in realistic deployment scenario.
+        
+        Simulates: "Rank ALL drugs for a disease, how many true associations are in top-K?"
+        This reflects the real 1:2000 or more ratio you'd face in drug repurposing.
+        """
+        print("\n" + "="*80)
+        print("REALISTIC DEPLOYMENT EVALUATION")
+        print("="*80)
+        print(f"Simulating: Rank all drugs for {num_diseases} diseases")
+        print(f"Reporting: Recall@K for K={top_k_values}")
+        print("="*80)
+        
+        model_path = model_info['model_path']
+        model_class = model_info['model_class']
+        
+        # Load model
+        model_config = config.get_model_config()
+        model = model_class(
+            in_channels=graph.x.size(1),
+            hidden_channels=model_config['hidden_channels'],
+            out_channels=model_config['out_channels'],
+            num_layers=model_config['num_layers'],
+            dropout_rate=model_config['dropout_rate']
+        ).to(self.device)
+        
+        model.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=False))
+        model.eval()
+        
+        # Get drug-disease edges from test set
+        test_positives = set()
+        for i in range(len(graph.test_edge_index)):
+            src, dst = graph.test_edge_index[i, 0].item(), graph.test_edge_index[i, 1].item()
+            if graph.test_edge_label[i].item() == 1:
+                test_positives.add((src, dst))
+        
+        # Group by disease
+        disease_to_drugs = {}
+        for src, dst in test_positives:
+            if dst not in disease_to_drugs:
+                disease_to_drugs[dst] = []
+            disease_to_drugs[dst].append(src)
+        
+        # Sample diseases with at least 5 positive drugs
+        eligible_diseases = [d for d, drugs in disease_to_drugs.items() if len(drugs) >= 5]
+        if len(eligible_diseases) == 0:
+            print("⚠️  No diseases with ≥5 positive drugs in test set")
+            return None
+        
+        config = get_config()
+        enable_full_reproducibility(config.seed)
+        sample_diseases = random.sample(eligible_diseases, min(num_diseases, len(eligible_diseases)))
+        
+        # Evaluate recall@K for each disease
+        with torch.no_grad():
+            graph = graph.to(self.device)
+            z = model(graph.x.float(), graph.edge_index)
+            
+            num_drugs = 2000  # Approximate number of drugs
+            drug_embeddings = z[:num_drugs]
+            
+            recall_at_k = {k: [] for k in top_k_values}
+            
+            for disease_idx in sample_diseases:
+                disease_embedding = z[disease_idx]
+                true_drugs = set(disease_to_drugs[disease_idx])
+                
+                # Score all drugs
+                scores = torch.matmul(drug_embeddings, disease_embedding)
+                probs = torch.sigmoid(scores)
+                
+                # Get top-K predictions
+                for k in top_k_values:
+                    top_k_drugs = torch.topk(probs, k).indices.cpu().tolist()
+                    top_k_set = set(top_k_drugs)
+                    
+                    # Calculate recall
+                    hits = len(true_drugs & top_k_set)
+                    recall = hits / len(true_drugs)
+                    recall_at_k[k].append(recall)
+        
+        # Average across diseases
+        deployment_metrics = {}
+        print("\nDeployment Metrics (Recall@K):")
+        print("-" * 40)
+        for k in top_k_values:
+            avg_recall = np.mean(recall_at_k[k])
+            deployment_metrics[f'recall@{k}'] = avg_recall
+            print(f"  Recall@{k:3d}: {avg_recall:.3f} ({avg_recall*100:.1f}% of true drugs found)")
+        
+        print("\nInterpretation:")
+        print(f"  When ranking {num_drugs} drugs for a new disease,")
+        print(f"  the model finds ~{deployment_metrics['recall@100']*100:.0f}% of true associations")
+        print(f"  by investigating only the top 100 candidates (5% effort)")
+        print("="*80 + "\n")
+        
+        return deployment_metrics
     
     def _log_metrics_to_mlflow(self, model_name, results):
         """Log test metrics to MLflow."""
@@ -874,7 +990,7 @@ def main():
     config = get_config()
     
     # Set reproducibility
-    enable_full_reproducibility(42)
+    enable_full_reproducibility(config.seed)
     
     # Initialize evaluator (MLflow enabled by default unless --no-mlflow is passed)
     evaluator = ModelEvaluator(

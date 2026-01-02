@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
 """
-Long COVID Drug Repurposing Script (Modern Version)
+Long COVID Drug Repurposing Script
 
 This script adds Long COVID (MONDO:0100320) to an existing trained graph and
 predicts drug repurposing candidates using a trained GNN model.
 
-Steps:
-1. Load existing graph and trained model
-2. Check if Long COVID exists; if not, add it with proper edges
-3. Run drug repurposing predictions
-4. Export top candidates
+Features:
+- Predict all drugs or top-k candidates
+- Look up drug names from ChEMBL database
+- Generate visualisations of prediction distributions
+- Export comprehensive reports
 
 Usage:
-    python long_covid_drug_repurposing.py --top-k 50
-    python long_covid_drug_repurposing.py --graph results/graph_latest.pt --model results/models/SAGEModel_best.pt
+    python long_covid_drug_repurposing.py --top-k 50 --lookup-names
+    python long_covid_drug_repurposing.py --all-drugs --visualise
 
 Author: Drug Repurposing Pipeline
-Date: December 2025
+Date: January 2026
 """
 
 import os
@@ -28,9 +28,14 @@ import pandas as pd
 import numpy as np
 import torch
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
+import seaborn as sns
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime
+import time
+import urllib.request
+import urllib.error
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent))
@@ -83,8 +88,171 @@ def find_latest_model(results_dir='results', model_type=None):
     return latest_model
 
 
+def lookup_chembl_drug_name(chembl_id: str, timeout: int = 10) -> Dict[str, str]:
+    """
+    Look up drug information from ChEMBL API
+    
+    Args:
+        chembl_id: ChEMBL ID (e.g., 'CHEMBL25')
+        timeout: Request timeout in seconds
+    
+    Returns:
+        Dictionary with drug information
+    """
+    try:
+        # ChEMBL API endpoint
+        url = f"https://www.ebi.ac.uk/chembl/api/data/molecule/{chembl_id}.json"
+        
+        req = urllib.request.Request(url)
+        req.add_header('User-Agent', 'DrugRepurposingPipeline/1.0 (Python/urllib)')
+        req.add_header('Accept', 'application/json')
+        
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            data = json.loads(response.read().decode())
+            
+            # Extract key information
+            pref_name = data.get('pref_name', None)
+            if not pref_name or pref_name == 'None' or pref_name is None:
+                pref_name = chembl_id
+            
+            # Try to find a common/generic name from synonyms
+            synonyms = data.get('molecule_synonyms', [])
+            common_name = pref_name
+            
+            if synonyms and isinstance(synonyms, list) and len(synonyms) > 0:
+                # Prioritise shorter, readable names
+                for syn in synonyms:
+                    if isinstance(syn, dict):
+                        syn_name = syn.get('molecule_synonym', '') or syn.get('synonym', '')
+                    else:
+                        continue
+                    
+                    # Skip empty, long chemical names, or CHEMBL IDs
+                    if (syn_name and 
+                        len(syn_name) < 50 and 
+                        not syn_name.startswith('CHEMBL') and
+                        not any(c in syn_name for c in ['[', ']', '{', '}']) and
+                        len(syn_name) < len(common_name)):
+                        common_name = syn_name
+            
+            # Get approval status
+            max_phase = data.get('max_phase')
+            if max_phase is None or max_phase == '' or max_phase == 'None':
+                max_phase = 0
+            else:
+                try:
+                    max_phase = int(max_phase)
+                except (ValueError, TypeError):
+                    max_phase = 0
+            
+            if max_phase == 4:
+                status = 'Approved'
+            elif max_phase >= 1:
+                status = f'Clinical Phase {max_phase}'
+            elif max_phase == 0:
+                status = 'Preclinical'
+            else:
+                status = 'Unknown'
+            
+            first_approval = data.get('first_approval', None)
+            molecule_type = data.get('molecule_type', 'Unknown')
+            
+            return {
+                'preferred_name': pref_name,
+                'common_name': common_name,
+                'max_phase': max_phase,
+                'molecule_type': molecule_type if molecule_type else 'Unknown',
+                'first_approval': first_approval,
+                'status': status
+            }
+    
+    except urllib.error.HTTPError as e:
+        # Drug not found in ChEMBL (404)
+        return {
+            'preferred_name': chembl_id, 
+            'common_name': chembl_id, 
+            'status': 'Not in ChEMBL', 
+            'max_phase': 0,
+            'molecule_type': 'Unknown',
+            'first_approval': None
+        }
+    except Exception as e:
+        # Any other error
+        return {
+            'preferred_name': chembl_id, 
+            'common_name': chembl_id, 
+            'status': 'Lookup Error', 
+            'max_phase': 0,
+            'molecule_type': 'Unknown',
+            'first_approval': None
+        }
+
+
+def batch_lookup_drug_names(drug_ids: List[str], delay: float = 0.5, verbose: bool = True) -> pd.DataFrame:
+    """
+    Look up multiple drug names from ChEMBL API
+    
+    Args:
+        drug_ids: List of ChEMBL IDs
+        delay: Delay between API calls (seconds)
+        verbose: Print progress
+    
+    Returns:
+        DataFrame with drug information
+    """
+    if verbose:
+        print(f"\nLooking up {len(drug_ids)} drug names from ChEMBL database...")
+        print(f"   (This may take ~{len(drug_ids) * delay:.0f} seconds)")
+    
+    results = []
+    success_count = 0
+    error_count = 0
+    
+    for i, drug_id in enumerate(drug_ids, 1):
+        if verbose and i % 10 == 0:
+            print(f"   Progress: {i}/{len(drug_ids)} ({i/len(drug_ids)*100:.0f}%) - Success: {success_count}, Errors: {error_count}")
+        
+        info = lookup_chembl_drug_name(drug_id)
+        info['chembl_id'] = drug_id
+        results.append(info)
+        
+        # Track success/error
+        if info['status'] not in ['Error', 'Network Error']:
+            success_count += 1
+        else:
+            error_count += 1
+        
+        # Be polite to the API
+        if i < len(drug_ids):
+            time.sleep(delay)
+    
+    if verbose:
+        print(f"   Lookup complete! Success: {success_count}/{len(drug_ids)} ({success_count/len(drug_ids)*100:.1f}%)")
+        if error_count > 0:
+            print(f"   WARNING: {error_count} lookups failed (may not exist in ChEMBL)")
+    
+    return pd.DataFrame(results)
+
+
+def find_drug_in_predictions(drug_id: str, predictions_df: pd.DataFrame) -> Optional[pd.Series]:
+    """
+    Find a specific drug in the predictions
+    
+    Args:
+        drug_id: ChEMBL ID to search for
+        predictions_df: DataFrame with all predictions
+    
+    Returns:
+        Row with drug information, or None if not found
+    """
+    matches = predictions_df[predictions_df['drug_id'] == drug_id]
+    if len(matches) > 0:
+        return matches.iloc[0]
+    return None
+
+
 class LongCOVIDDrugRepurposing:
-    """Modern Long COVID drug repurposing analyzer"""
+    """Modern Long COVID drug repurposing analyser"""
     
     def __init__(self, graph_path: str = None, model_path: str = None, 
                  data_path: str = "processed_data", results_path: str = "results/long_covid"):
@@ -266,7 +434,7 @@ class LongCOVIDDrugRepurposing:
             # Average features from similar diseases
             similar_features = self.graph.x[similar_disease_indices]
             new_node_features = similar_features.mean(dim=0, keepdim=True)
-            print(f"  Initialized features from {len(similar_disease_indices)} similar diseases")
+            print(f"  Initialised features from {len(similar_disease_indices)} similar diseases")
         else:
             # Fallback: use mean of all disease features
             num_drugs = len(self.drug_mapping)
@@ -340,7 +508,7 @@ class LongCOVIDDrugRepurposing:
         config = get_config()
         model_config = config.get_model_config()
         
-        # Initialize model
+        # Initialise model
         self.model = model_class(
             in_channels=self.graph.x.shape[1],
             hidden_channels=model_config['hidden_channels'],
@@ -360,92 +528,250 @@ class LongCOVIDDrugRepurposing:
         self.model.eval()
         print(f"  Model loaded and ready for inference")
     
-    def predict_drug_candidates(self, top_k: int = 50) -> pd.DataFrame:
-        """Predict drug repurposing candidates for Long COVID"""
-        print(f"\nPredicting top {top_k} drug candidates for Long COVID...")
+    def predict_drug_candidates(self, top_k: int = None, predict_all: bool = False) -> pd.DataFrame:
+        """
+        Predict drug repurposing candidates for Long COVID
+        
+        Args:
+            top_k: Number of top candidates to return (None = return all)
+            predict_all: If True, predict and store scores for ALL drugs
+        
+        Returns:
+            DataFrame with predictions
+        """
+        num_drugs = len(self.drug_mapping)
+        
+        if predict_all or top_k is None:
+            print(f"\nPredicting ALL {num_drugs:,} drug candidates for Long COVID...")
+        else:
+            print(f"\nPredicting top {top_k} drug candidates for Long COVID...")
         
         with torch.no_grad():
-            # Get node embeddings from model (same as training)
+            # Get node embeddings from model
             embeddings = self.model(self.graph.x, self.graph.edge_index)
             
-            # DIAGNOSTIC: Check embedding statistics
-            print(f"\nEMBEDDING DIAGNOSTICS:")
-            print(f"  Embedding shape: {embeddings.shape}")
-            print(f"  Embedding mean: {embeddings.mean():.4f}")
-            print(f"  Embedding std: {embeddings.std():.4f}")
-            print(f"  Embedding min: {embeddings.min():.4f}")
-            print(f"  Embedding max: {embeddings.max():.4f}")
+            # Normalise embeddings (consistent with training/testing)
+            embeddings = F.normalize(embeddings, p=2, dim=1)
             
             # Get Long COVID embedding
             long_covid_embedding = embeddings[self.long_covid_idx]
-            print(f"\n  Long COVID embedding mean: {long_covid_embedding.mean():.4f}")
-            print(f"  Long COVID embedding std: {long_covid_embedding.std():.4f}")
             
-            # Get drug embeddings (first N nodes are drugs)
-            num_drugs = len(self.drug_mapping)
+            # Get all drug embeddings (first N nodes are drugs)
             drug_embeddings = embeddings[:num_drugs]
             
-            print(f"\n  Drug embeddings mean: {drug_embeddings.mean():.4f}")
-            print(f"  Drug embeddings std: {drug_embeddings.std():.4f}")
+            # Calculate similarity scores (dot product, now bounded to [-1, 1])
+            scores = torch.matmul(drug_embeddings, long_covid_embedding)
             
-            # IMPORTANT: Use the SAME edge prediction as during training
-            # Edge score = dot product of embeddings (element-wise multiply then sum)
-            edge_scores = (drug_embeddings * long_covid_embedding).sum(dim=-1)
+            # Apply sigmoid to get probabilities
+            probabilities = torch.sigmoid(scores)
             
-            # Apply sigmoid to get probability of edge existing (just like training)
-            probabilities = torch.sigmoid(edge_scores)
+            # Store for later use (for visualisations)
+            self.all_scores = scores.cpu().numpy()
+            self.all_probabilities = probabilities.cpu().numpy()
             
-            # DIAGNOSTIC: Show score distribution across ALL drugs
-            print(f"\nEDGE SCORE DISTRIBUTION (across all {num_drugs} drugs):")
-            percentiles = [0, 10, 25, 50, 75, 90, 95, 99, 100]
-            percentile_values = torch.quantile(edge_scores, torch.tensor([p/100 for p in percentiles]))
-            for p, val in zip(percentiles, percentile_values):
-                prob = torch.sigmoid(val)
-                print(f"  {p:3d}th percentile: edge_score={val:7.4f} -> prob={prob:.4f}")
-            
-            print(f"\nPROBABILITY DISTRIBUTION:")
-            prob_percentile_values = torch.quantile(probabilities, torch.tensor([p/100 for p in percentiles]))
-            for p, val in zip(percentiles, prob_percentile_values):
-                print(f"  {p:3d}th percentile: prob={val:.4f}")
-            
-            # Check if embeddings are actually different (variance check)
-            embedding_variance = drug_embeddings.var(dim=0).mean()
-            print(f"\n  Average variance across embedding dimensions: {embedding_variance:.6f}")
-            if embedding_variance < 0.01:
-                print("  ⚠️  WARNING: Very low variance! Embeddings may have collapsed.")
-            
-            # Get top-k predictions
-            top_probs, top_indices = torch.topk(probabilities, min(top_k, len(probabilities)))
+            # Determine how many predictions to return
+            if predict_all or top_k is None:
+                # Return all drugs, sorted by probability
+                sorted_indices = torch.argsort(probabilities, descending=True)
+                top_probs = probabilities[sorted_indices]
+                top_indices = sorted_indices
+            else:
+                # Get top-k predictions
+                top_probs, top_indices = torch.topk(probabilities, min(top_k, len(probabilities)))
             
             # Create results dataframe
             results = []
             for rank, (prob, idx) in enumerate(zip(top_probs.cpu().numpy(), top_indices.cpu().numpy()), 1):
                 drug_id = self.idx_to_drug[int(idx)]
                 
-                # Try to get drug name from ChEMBL or use ID
-                drug_name = drug_id  # Default to ID
-                
                 results.append({
                     'rank': rank,
                     'drug_id': drug_id,
-                    'drug_name': drug_name,
+                    'drug_name': drug_id,  # Will be updated if lookup is requested
                     'probability': float(prob),
-                    'edge_score': float(edge_scores[idx].cpu()),
+                    'score': float(scores[idx].cpu()),
                     'confidence': 'High' if prob > 0.7 else 'Medium' if prob > 0.5 else 'Low'
                 })
             
             df = pd.DataFrame(results)
             
-            print(f"\nTop 10 Drug Candidates:")
+            print(f"  Generated {len(df):,} predictions")
+            
+            # Print statistics
+            print(f"\n Prediction Statistics:")
+            print(f"   Total drugs:      {num_drugs:,}")
+            print(f"   Probability range: {self.all_probabilities.min():.4f} - {self.all_probabilities.max():.4f}")
+            print(f"   Mean probability:  {self.all_probabilities.mean():.4f}")
+            print(f"   Median probability: {np.median(self.all_probabilities):.4f}")
+            print(f"   Std deviation:     {self.all_probabilities.std():.4f}")
+            
+            # Count by confidence
+            high_conf = np.sum(self.all_probabilities > 0.7)
+            med_conf = np.sum((self.all_probabilities > 0.5) & (self.all_probabilities <= 0.7))
+            low_conf = np.sum(self.all_probabilities <= 0.5)
+            
+            print(f"\n Confidence Distribution:")
+            print(f"   High (>0.7):    {high_conf:,} drugs ({high_conf/num_drugs*100:.1f}%)")
+            print(f"   Medium (0.5-0.7): {med_conf:,} drugs ({med_conf/num_drugs*100:.1f}%)")
+            print(f"   Low (<0.5):     {low_conf:,} drugs ({low_conf/num_drugs*100:.1f}%)")
+            
+            print(f"\n Top 10 Drug Candidates:")
             print("=" * 80)
             
             for _, row in df.head(10).iterrows():
                 print(f"{row['rank']:2d}. {row['drug_name']}")
-                print(f"    Probability: {row['probability']:.4f} | Edge Score: {row['edge_score']:.4f} | Confidence: {row['confidence']}")
+                print(f"    Probability: {row['probability']:.4f} | Score: {row['score']:.4f} | Confidence: {row['confidence']}")
                 print(f"    ID: {row['drug_id']}")
                 print()
             
             return df
+    
+    def lookup_drug_names(self, results_df: pd.DataFrame, top_n: int = None) -> pd.DataFrame:
+        """
+        Look up drug names from ChEMBL for the predictions
+        
+        Args:
+            results_df: DataFrame with predictions
+            top_n: Only lookup top N drugs (None = lookup all, but can be slow!)
+        
+        Returns:
+            DataFrame with drug names added
+        """
+        if top_n is not None:
+            drug_ids = results_df.head(top_n)['drug_id'].tolist()
+            print(f"\n Looking up names for top {top_n} drugs...")
+        else:
+            drug_ids = results_df['drug_id'].tolist()
+            print(f"\n Looking up names for {len(drug_ids)} drugs...")
+            if len(drug_ids) > 100:
+                print(f"     This will take ~{len(drug_ids) * 0.3 / 60:.1f} minutes. Consider using --lookup-top-n instead.")
+        
+        # Lookup drug information
+        drug_info_df = batch_lookup_drug_names(drug_ids)
+        
+        # Merge with results
+        results_with_names = results_df.merge(
+            drug_info_df,
+            left_on='drug_id',
+            right_on='chembl_id',
+            how='left'
+        )
+        
+        # Update drug_name column
+        results_with_names['drug_name'] = results_with_names['common_name'].fillna(results_with_names['drug_id'])
+        
+        # Add additional columns
+        results_with_names['preferred_name'] = results_with_names['preferred_name'].fillna(results_with_names['drug_id'])
+        results_with_names['approval_status'] = results_with_names['status'].fillna('Unknown')
+        results_with_names['max_phase'] = results_with_names['max_phase'].fillna(-1).astype(int)
+        
+        # Drop duplicate columns
+        results_with_names = results_with_names.drop(columns=['chembl_id', 'status'], errors='ignore')
+        
+        # Show approved drugs in top candidates
+        approved_in_top = results_with_names[results_with_names['approval_status'] == 'Approved'].head(20)
+        
+        if len(approved_in_top) > 0:
+            print(f"\n FDA-Approved Drugs in Top Candidates:")
+            print("=" * 80)
+            for _, row in approved_in_top.head(10).iterrows():
+                print(f"{row['rank']:2d}. {row['drug_name']}")
+                print(f"    Probability: {row['probability']:.4f} | Approval: {row['first_approval']}")
+                print(f"    Preferred name: {row['preferred_name']}")
+                print()
+        
+        return results_with_names
+    
+    def create_visualisations(self, results_df: pd.DataFrame, timestamp: str = None):
+        """
+        Create visualisations of prediction results
+        
+        Args:
+            results_df: DataFrame with predictions
+            timestamp: Timestamp string for filenames
+        """
+        if timestamp is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        print(f"\n Creating visualisations...")
+        
+        # Set style
+        sns.set_style("whitegrid")
+        plt.rcParams['figure.facecolor'] = 'white'
+        
+        # Create figure with subplots
+        fig = plt.figure(figsize=(20, 12))
+        gs = fig.add_gridspec(2, 2, hspace=0.3, wspace=0.3)
+        
+        # 1. Probability distribution (all drugs)
+        ax1 = fig.add_subplot(gs[0, 0])
+        ax1.hist(self.all_probabilities, bins=50, edgecolor='black', alpha=0.7, color='steelblue')
+        ax1.axvline(np.median(self.all_probabilities), color='red', linestyle='--', linewidth=2, 
+                    label=f'Median: {np.median(self.all_probabilities):.3f}')
+        ax1.axvline(self.all_probabilities.mean(), color='orange', linestyle='--', linewidth=2,
+                    label=f'Mean: {self.all_probabilities.mean():.3f}')
+        ax1.set_xlabel('Probability', fontsize=12, fontweight='bold')
+        ax1.set_ylabel('Number of Drugs', fontsize=12, fontweight='bold')
+        ax1.set_title('Probability Distribution (All Drugs)', fontsize=14, fontweight='bold')
+        ax1.legend(fontsize=10)
+        ax1.grid(alpha=0.3)
+        
+        # 2. Top 20 candidates bar chart
+        ax2 = fig.add_subplot(gs[0, 1])
+        top_20 = results_df.head(20)
+        colors = ['red' if c == 'High' else 'orange' if c == 'Medium' else 'gray' 
+                  for c in top_20['confidence']]
+        
+        bars = ax2.barh(range(len(top_20)), top_20['probability'], color=colors, alpha=0.7, edgecolor='black')
+        ax2.set_yticks(range(len(top_20)))
+        ax2.set_yticklabels([f"{r['rank']}. {r['drug_name'][:30]}" for _, r in top_20.iterrows()], fontsize=9)
+        ax2.set_xlabel('Probability', fontsize=12, fontweight='bold')
+        ax2.set_title('Top 20 Drug Candidates', fontsize=14, fontweight='bold')
+        ax2.invert_yaxis()
+        ax2.grid(alpha=0.3, axis='x')
+        ax2.axvline(0.7, color='red', linestyle='--', alpha=0.5, label='High confidence')
+        ax2.axvline(0.5, color='orange', linestyle='--', alpha=0.5, label='Medium confidence')
+        ax2.legend(fontsize=9)
+        
+        # 3. Confidence pie chart
+        ax3 = fig.add_subplot(gs[1, 0])
+        high_conf = np.sum(self.all_probabilities > 0.7)
+        med_conf = np.sum((self.all_probabilities > 0.5) & (self.all_probabilities <= 0.7))
+        low_conf = np.sum(self.all_probabilities <= 0.5)
+        
+        sizes = [high_conf, med_conf, low_conf]
+        labels = [f'High\n({high_conf})', f'Medium\n({med_conf})', f'Low\n({low_conf})']
+        colors_pie = ['#ff6b6b', '#ffd93d', '#95e1d3']
+        
+        ax3.pie(sizes, labels=labels, colors=colors_pie, autopct='%1.1f%%', startangle=90)
+        ax3.set_title('Confidence Distribution', fontsize=12, fontweight='bold')
+        
+        # 4. Top 50 vs Rest boxplot
+        ax4 = fig.add_subplot(gs[1, 1])
+        top_50_probs = results_df.head(50)['probability']
+        rest_probs = results_df.iloc[50:]['probability'] if len(results_df) > 50 else []
+        
+        if len(rest_probs) > 0:
+            box_data = [top_50_probs, rest_probs]
+            bp = ax4.boxplot(box_data, tick_labels=['Top 50', 'Rest'], patch_artist=True)
+            bp['boxes'][0].set_facecolor('lightcoral')
+            bp['boxes'][1].set_facecolor('lightblue')
+        else:
+            ax4.boxplot([top_50_probs], tick_labels=['Top 50'], patch_artist=True)
+        
+        ax4.set_ylabel('Probability', fontsize=10, fontweight='bold')
+        ax4.set_title('Top 50 vs Rest', fontsize=12, fontweight='bold')
+        ax4.grid(alpha=0.3, axis='y')
+        
+        # Main title
+        fig.suptitle('Long COVID Drug Repurposing Analysis', fontsize=18, fontweight='bold', y=0.995)
+        
+        # Save plot
+        plot_file = self.results_path / f"long_covid_predictions_visualisation_{timestamp}.png"
+        plt.savefig(plot_file, dpi=300, bbox_inches='tight')
+        print(f"   Saved visualisation: {plot_file}")
+        
+        plt.close()
     
     def save_results(self, results_df: pd.DataFrame, output_file: str = None):
         """Save prediction results"""
@@ -478,13 +804,41 @@ class LongCOVIDDrugRepurposing:
         
         print(f"Summary saved to: {summary_file}")
     
-    def run_analysis(self, top_k: int = 50):
-        """Run complete Long COVID drug repurposing analysis"""
+    def run_analysis(self, top_k: int = None, predict_all: bool = False, 
+                    lookup_names: bool = False, lookup_top_n: int = None,
+                    visualise: bool = False):
+        """
+        Run complete Long COVID drug repurposing analysis
+        
+        Args:
+            top_k: Number of top candidates to export
+            predict_all: Predict all drugs (not just top-k)
+            lookup_names: Look up drug names from ChEMBL
+            lookup_top_n: Only lookup names for top N drugs
+            visualise: Create visualisation plots
+        """
         print("=" * 80)
         print("Long COVID Drug Repurposing Analysis")
         print("=" * 80)
         print(f"Disease: {self.long_covid_id} - {self.long_covid_name}")
-        print(f"Requested predictions: {top_k}")
+        
+        if predict_all:
+            print(f"Mode: Predict ALL drugs")
+        elif top_k:
+            print(f"Mode: Top {top_k} predictions")
+        else:
+            print(f"Mode: Top 50 predictions (default)")
+            top_k = 50
+        
+        if lookup_names:
+            if lookup_top_n:
+                print(f"Drug name lookup: Top {lookup_top_n} drugs")
+            else:
+                print(f"Drug name lookup: Enabled for all predictions")
+        
+        if visualise:
+            print(f"Visualisations: Enabled")
+        
         print()
         
         # Step 1: Load graph
@@ -506,9 +860,18 @@ class LongCOVIDDrugRepurposing:
         self.load_model()
         
         # Step 5: Predict drug candidates
-        results_df = self.predict_drug_candidates(top_k)
+        results_df = self.predict_drug_candidates(top_k=top_k, predict_all=predict_all)
         
-        # Step 6: Save results
+        # Step 6: Look up drug names if requested
+        if lookup_names:
+            results_df = self.lookup_drug_names(results_df, top_n=lookup_top_n)
+        
+        # Step 7: Create visualisations if requested
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if visualise:
+            self.create_visualisations(results_df, timestamp)
+        
+        # Step 8: Save results
         self.save_results(results_df)
         
         print("\n" + "=" * 80)
@@ -525,48 +888,106 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run with auto-detected latest files
-  python long_covid_drug_repurposing.py --top-k 50
+  # Basic: Get top 50 candidates
+  python long_covid_drug_repurposing.py
   
-  # Specify specific graph and model
-  python long_covid_drug_repurposing.py --graph results/graph_latest.pt --model results/SAGEModel_best.pt
+  # Get top 100 candidates with drug names and visualisations
+  python long_covid_drug_repurposing.py --top-k 100 --lookup-names --visualise
   
-  # Get top 100 candidates
-  python long_covid_drug_repurposing.py --top-k 100 --output results/long_covid/top100.csv
+  # Predict ALL drugs with visualisations (no name lookup to save time)
+  python long_covid_drug_repurposing.py --all-drugs --visualise
+  
+  # Get top 200 candidates but only lookup names for top 50
+  python long_covid_drug_repurposing.py --top-k 200 --lookup-names --lookup-top-n 50 --visualise
+  
+  # Specify custom graph and model
+  python long_covid_drug_repurposing.py --graph results/graph_latest.pt --model results/SAGEModel_best.pt --visualise
+
+Note: Drug name lookup uses ChEMBL API and can be slow for many drugs.
+      Use --lookup-top-n to limit lookups to top N candidates.
 """
     )
     
+    # File paths
     parser.add_argument('--graph', type=str, help='Path to graph file (.pt)')
     parser.add_argument('--model', type=str, help='Path to trained model (.pt)')
-    parser.add_argument('--top-k', type=int, default=50, 
-                       help='Number of top drug candidates to return (default: 50)')
-    parser.add_argument('--output', type=str, 
-                       help='Output CSV file path (default: auto-generated in results/long_covid/)')
     parser.add_argument('--data-path', type=str, default='processed_data',
                        help='Path to processed data directory')
     parser.add_argument('--results-path', type=str, default='results/long_covid',
                        help='Path to results directory (default: results/long_covid)')
+    parser.add_argument('--output', type=str, 
+                       help='Output CSV file path (default: auto-generated in results/long_covid/)')
+    
+    # Prediction options
+    prediction_group = parser.add_argument_group('Prediction Options')
+    prediction_group.add_argument('--top-k', type=int, default=50, 
+                                  help='Number of top drug candidates to return (default: 50)')
+    prediction_group.add_argument('--all-drugs', action='store_true',
+                                  help='Predict ALL drugs instead of just top-k (returns all ~1,900 drugs)')
+    
+    # Drug name lookup options
+    lookup_group = parser.add_argument_group('Drug Name Lookup Options')
+    lookup_group.add_argument('--lookup-names', action='store_true',
+                             help='Look up drug names from ChEMBL database (can be slow)')
+    lookup_group.add_argument('--lookup-top-n', type=int, 
+                             help='Only lookup names for top N drugs (default: lookup all in results)')
+    
+    # Visualisation options
+    viz_group = parser.add_argument_group('Visualisation Options')
+    viz_group.add_argument('--visualise', action='store_true',
+                          help='Create visualisation plots of predictions')
+    viz_group.add_argument('--no-visualise', action='store_true',
+                          help='Skip visualisation generation')
     
     args = parser.parse_args()
     
     # Set random seed for reproducibility
     enable_full_reproducibility(42)
     
+    # Determine visualisation flag
+    visualise = args.visualise and not args.no_visualise
+    
     try:
-        # Initialize analyzer
-        analyzer = LongCOVIDDrugRepurposing(
+        # Initialise analyser
+        analyser = LongCOVIDDrugRepurposing(
             graph_path=args.graph,
             model_path=args.model,
             data_path=args.data_path,
             results_path=args.results_path
         )
         
-        # Run analysis
-        results = analyzer.run_analysis(top_k=args.top_k)
+        # Run analysis with all options
+        results = analyser.run_analysis(
+            top_k=None if args.all_drugs else args.top_k,
+            predict_all=args.all_drugs,
+            lookup_names=args.lookup_names,
+            lookup_top_n=args.lookup_top_n,
+            visualise=visualise
+        )
         
         # Save with custom output path if provided
         if args.output:
-            analyzer.save_results(results, args.output)
+            analyser.save_results(results, args.output)
+        
+        # Print summary
+        print(f"\nSummary:")
+        print(f"   Total predictions: {len(results):,}")
+        print(f"   High confidence (>0.7): {len(results[results['confidence'] == 'High']):,}")
+        print(f"   Medium confidence (0.5-0.7): {len(results[results['confidence'] == 'Medium']):,}")
+        
+        if args.lookup_names:
+            approved = results[results.get('approval_status', '') == 'Approved']
+            if len(approved) > 0:
+                print(f"   FDA-approved drugs found: {len(approved):,}")
+        
+        print(f"\nNext steps:")
+        print(f"   1. Review the top candidates in the CSV file")
+        if visualise:
+            print(f"   2. Check the visualisation plots in {args.results_path}/")
+        if not args.lookup_names:
+            print(f"   2. Re-run with --lookup-names to get drug names")
+        print(f"   3. Research mechanisms of action for top candidates")
+        print(f"   4. Consider clinical trial feasibility for approved drugs")
         
         return 0
         
