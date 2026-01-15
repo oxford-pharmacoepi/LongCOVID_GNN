@@ -9,6 +9,7 @@ Drug repurposing accelerates treatment discovery by identifying new therapeutic 
 **Key Capabilities:**
 - Temporal validation using time-stamped Open Targets releases (2021, 2023, 2024)
 - Multiple negative sampling strategies (random, hard, degree-matched, feature-similarity, mixed)
+- Bayesian hyperparameter optimisation with Optuna
 - Comprehensive experiment tracking with MLflow
 - Specific Long COVID drug candidate identification
 - Model explainability via GNNExplainer
@@ -23,13 +24,15 @@ LongCOVID_GNN/
 │   ├── config.py                     # Centralized configuration
 │   ├── data_processing.py            # Data loading and preprocessing
 │   ├── negative_sampling.py          # Negative sampling strategies
+│   ├── bayesian_optimiser.py         # Bayesian hyperparameter optimisation
 │   └── mlflow_tracker.py             # Experiment tracking
 │
 ├── scripts/                          # Pipeline components
 │   ├── 1_create_graph.py             # Knowledge graph construction
 │   ├── 2_train_models.py             # Model training with validation
 │   ├── 3_test_evaluate.py            # Testing and evaluation
-│   └── 4_explain_predictions.py      # Prediction explanation
+│   ├── 4_explain_predictions.py      # Prediction explanation
+│   └── 5_optimise_hyperparameters.py # Standalone hyperparameter optimisation
 │
 # This is retrievable if the user runs the data extraction script
 ├── processed_data/                   # Pre-processed datasets (included)
@@ -151,7 +154,10 @@ uv run python scripts/1_create_graph.py \
 uv run python scripts/2_train_models.py
 
 # Train specific model
-uv run python scripts/2_train_models.py --models Transformer --epochs 200
+uv run python scripts/2_train_models.py --model Transformer --epochs 200
+
+# Train with automatic hyperparameter optimisation (recommended)
+uv run python scripts/2_train_models.py --optimise-first --n-trials 100 --model Transformer
 ```
 
 **Training features:**
@@ -159,6 +165,30 @@ uv run python scripts/2_train_models.py --models Transformer --epochs 200
 - Negative sampling strategies
 - Mixed precision training
 - Automatic hyperparameter logging
+- Optional Bayesian hyperparameter optimisation
+
+**Hyperparameter Optimisation Workflows:**
+
+**Option 1: Integrated optimisation (one command)**
+```bash
+# Optimise hyperparameters, then train immediately with best params
+uv run python scripts/2_train_models.py --optimise-first --n-trials 50 --model Transformer
+```
+
+**Option 2: Sequential optimisation**
+```bash
+# Step 1: Run optimisation separately
+uv run python scripts/5_optimise_hyperparameters.py --model Transformer --n-trials 100
+
+# Step 2: Review results in results/bayesian_optimisation/
+# - best_params_*.json contains optimal hyperparameters
+# - optimisation_plots_*.png shows convergence and importance
+
+# Step 3: Update src/config.py with best parameters (should be automatic, but check manually)
+
+# Step 4: Train with optimised hyperparameters
+uv run python scripts/2_train_models.py --model Transformer
+```
 
 ### 3. Evaluation
 
@@ -189,6 +219,16 @@ uv run python scripts/4_explain_predictions.py \
     --graph results/graph_*.pt \
     --predictions results/predictions/TransformerModel_predictions.csv \
     --top-k 20
+```
+
+### 5. Hyperparameter Optimisation
+
+```bash
+# Optimise hyperparameters
+uv run python scripts/5_optimise_hyperparameters.py \
+    --model Transformer \
+    --trials 50 \
+    --timeout 3600
 ```
 
 ## Configuration

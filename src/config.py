@@ -53,17 +53,17 @@ class Config:
 
         # Model hyperparameters
         self.model_config = {
-            'learning_rate': 0.001,
-            'weight_decay': 1e-4,
-            'hidden_channels': 16,
-            'out_channels': 16,
+            'learning_rate': 0.0015456417318475437,
+            'weight_decay': 2.7189746426884763e-06,
+            'hidden_channels': 64,
+            'out_channels': 32,
             'num_layers': 2,
-            'dropout_rate': 0.5,
+            'dropout_rate': 0.4870800162873122,
             'num_epochs': 500,
             'patience': 10,
-            'batch_size': 512,
-            'heads': 4,
-            'concat': False
+            'batch_size': 1024,
+            'heads': 2,
+            'concat': True 
         }
         
         # Training settings

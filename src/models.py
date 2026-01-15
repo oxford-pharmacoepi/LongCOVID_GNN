@@ -57,24 +57,30 @@ class GCNModel(torch.nn.Module):
 class TransformerModel(torch.nn.Module):
     """Graph Transformer model."""
     
-    def __init__(self, in_channels, hidden_channels, out_channels, num_layers=2, dropout_rate=0.5):
+    def __init__(self, in_channels, hidden_channels, out_channels, num_layers=2, dropout_rate=0.5, heads=4, concat=False):
         super(TransformerModel, self).__init__()
         self.num_layers = num_layers
+        self.heads = heads
+        self.concat = concat
 
-        # Initial TransformerConv layer with concat=False
-        self.conv1 = TransformerConv(in_channels, hidden_channels, heads=4, concat=False)
+        # Calculate the actual output dimension after multi-head attention
+        # If concat=True, output is hidden_channels * heads, otherwise it's hidden_channels
+        head_out_channels = hidden_channels * heads if concat else hidden_channels
+
+        # Initial TransformerConv layer
+        self.conv1 = TransformerConv(in_channels, hidden_channels, heads=heads, concat=concat)
 
         # Additional TransformerConv layers
         self.conv_list = torch.nn.ModuleList(
-            [TransformerConv(hidden_channels, hidden_channels, heads=4, concat=False) for _ in range(num_layers - 1)]
+            [TransformerConv(head_out_channels, hidden_channels, heads=heads, concat=concat) for _ in range(num_layers - 1)]
         )
 
         # Layer normalization and dropout
-        self.ln = torch.nn.LayerNorm(hidden_channels)
+        self.ln = torch.nn.LayerNorm(head_out_channels)
         self.dropout = torch.nn.Dropout(p=dropout_rate)
 
         # Final output layer
-        self.final_layer = torch.nn.Linear(hidden_channels, out_channels)
+        self.final_layer = torch.nn.Linear(head_out_channels, out_channels)
 
     def forward(self, x, edge_index):
         # Ensure input tensor is float32

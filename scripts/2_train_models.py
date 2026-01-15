@@ -2,6 +2,7 @@
 """
 Model Training Script for Drug-Disease Prediction
 Trains GNN models with early stopping and comprehensive evaluation.
+Supports optional Bayesian hyperparameter optimisation before training.
 """
 
 import torch
@@ -381,7 +382,7 @@ class ModelTrainer:
     
     def _create_training_plots(self, model_name, train_losses, val_losses, val_metrics, 
                               results_path, timestamp, metric_name='auc'):
-        """Create training visualization plots."""
+        """Create training visualisation plots."""
         
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
         
@@ -544,7 +545,7 @@ class ModelTrainer:
         return training_results
     
     def _create_model_comparison(self, training_results, results_path):
-        """Create model comparison visualization."""
+        """Create model comparison visualisation."""
         
         if not training_results:
             return
@@ -678,6 +679,12 @@ def main():
     parser.add_argument('--epochs', type=int, help='Number of training epochs (overrides config)')
     parser.add_argument('--output-dir', type=str, default='results/', help='Output directory')
     
+    # Bayesian optimisation options
+    parser.add_argument('--optimise-first', action='store_true',
+                       help='Run Bayesian hyperparameter optimisation before training')
+    parser.add_argument('--n-trials', type=int, default=50,
+                       help='Number of optimisation trials (default: 50, only used with --optimise-first)')
+    
     args = parser.parse_args()
     
     # Auto-detect graph if not provided
@@ -692,14 +699,89 @@ def main():
     # Load configuration from config.py (freshly reloaded)
     config = get_config()
     
+    # Bayesian Optimisation (if requested)
+    if args.optimise_first:
+        print("\n" + "="*80)
+        print("BAYESIAN HYPERPARAMETER OPTIMISATION")
+        print("="*80)
+        print(f"Running optimisation with {args.n_trials} trials before training...")
+        print("="*80 + "\n")
+        
+        try:
+            from src.bayesian_optimiser import BayesianOptimiser
+            
+            # Load graph for optimisation
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            graph = torch.load(args.graph, map_location=device, weights_only=False)
+            
+            # Set model choice for optimisation
+            if args.model != 'all':
+                config.model_choice = args.model
+            
+            # Run optimisation
+            optimiser = BayesianOptimiser(
+                graph=graph,
+                config=config,
+                n_trials=args.n_trials,
+                device=device,
+                mlflow_tracking=True,
+                results_dir=os.path.join(args.output_dir, 'bayesian_optimisation')
+            )
+            
+            results = optimiser.optimise()
+            
+            # Apply best hyperparameters to config
+            best_params = results['best_params']
+            config.model_config.update(best_params)
+            
+            print("\n" + "="*80)
+            print("OPTIMISATION COMPLETE - Applying best hyperparameters")
+            print("="*80)
+            print(f"Best {config.primary_metric.upper()}: {results['best_value']:.4f}")
+            print("\nOptimised hyperparameters:")
+            for key, value in best_params.items():
+                print(f"  {key:20s}: {value}")
+            print("="*80 + "\n")
+            
+            # Save optimised config
+            opt_config_path = os.path.join(args.output_dir, 'bayesian_optimisation', 'applied_config.json')
+            os.makedirs(os.path.dirname(opt_config_path), exist_ok=True)
+            with open(opt_config_path, 'w') as f:
+                json.dump({
+                    'model_config': config.model_config,
+                    'best_params': best_params,
+                    'optimisation_results': {
+                        'best_value': results['best_value'],
+                        'n_trials': args.n_trials,
+                        'model_choice': config.model_choice,
+                        'primary_metric': config.primary_metric
+                    }
+                }, f, indent=2)
+            
+            print(f"Optimised config saved to: {opt_config_path}\n")
+            
+        except ImportError:
+            print("ERROR: Bayesian optimiser not available. Please install optuna:")
+            print("  pip install optuna>=3.5.0")
+            return None
+        except Exception as e:
+            print(f"ERROR during optimisation: {e}")
+            print("Continuing with default hyperparameters...")
+    
     # Print config to verify it's correct
     print("\n" + "="*60)
-    print("CONFIGURATION LOADED:")
+    print("CONFIGURATION FOR TRAINING:")
     print("="*60)
     print(f"Loss function: {config.loss_function}")
     print(f"Primary metric: {config.primary_metric}")
     print(f"Negative sampling strategy: {config.negative_sampling_strategy}")
     print(f"Pos:Neg ratio: 1:{config.pos_neg_ratio}")
+    
+    # Print model config
+    print("\nModel hyperparameters:")
+    model_cfg = config.get_model_config()
+    for key, value in model_cfg.items():
+        print(f"  {key:20s}: {value}")
     print("="*60 + "\n")
     
     # Create results directory
@@ -723,6 +805,9 @@ def main():
         tracker.log_param("graph_path", args.graph)
         tracker.log_param("output_dir", args.output_dir)
         tracker.log_param("model_to_train", args.model)
+        tracker.log_param("optimised_hyperparams", args.optimise_first)
+        if args.optimise_first:
+            tracker.log_param("optimisation_trials", args.n_trials)
         
         # Auto-detect graph if not provided
         graph_path = args.graph or find_latest_graph()
