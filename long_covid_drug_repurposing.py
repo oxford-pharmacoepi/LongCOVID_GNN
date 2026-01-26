@@ -573,13 +573,13 @@ class LongCOVIDDrugRepurposing:
         self.model.eval()
         print(f"  Model loaded and ready for inference")
     
-    def predict_drug_candidates(self, top_k: int = None, predict_all: bool = False) -> pd.DataFrame:
+    def predict_drug_candidates(self, top_k: int = None, predict_all: bool = True) -> pd.DataFrame:
         """
         Predict drug repurposing candidates for Long COVID
         
         Args:
             top_k: Number of top candidates to return (None = return all)
-            predict_all: If True, predict and store scores for ALL drugs
+            predict_all: If True, predict and store scores for ALL drugs (default: True)
         
         Returns:
             DataFrame with predictions
@@ -611,9 +611,7 @@ class LongCOVIDDrugRepurposing:
             # Calculate similarity scores (dot product, now bounded to [-1, 1])
             scores = torch.matmul(drug_embeddings, long_covid_embedding)
             
-            # Apply sigmoid to get probabilities
-            probabilities = torch.sigmoid(scores)
-            
+            probabilities = torch.sigmoid(scores)            
             # Store for later use (for visualisations)
             self.all_scores = scores.cpu().numpy()
             self.all_probabilities = probabilities.cpu().numpy()
@@ -969,10 +967,10 @@ Note: Drug name lookup uses ChEMBL API and can be slow for many drugs.
     
     # Prediction options
     prediction_group = parser.add_argument_group('Prediction Options')
-    prediction_group.add_argument('--top-k', type=int, default=50, 
-                                  help='Number of top drug candidates to return (default: 50)')
-    prediction_group.add_argument('--all-drugs', action='store_true',
-                                  help='Predict ALL drugs instead of just top-k (returns all ~1,900 drugs)')
+    prediction_group.add_argument('--top-k', type=int, 
+                                  help='Number of top drug candidates to return (default: all drugs)')
+    prediction_group.add_argument('--all-drugs', action='store_true', default=True,
+                                  help='Predict ALL drugs instead of just top-k (default: True)')
     
     # Drug name lookup options
     lookup_group = parser.add_argument_group('Drug Name Lookup Options')
@@ -1024,7 +1022,8 @@ Note: Drug name lookup uses ChEMBL API and can be slow for many drugs.
         print(f"   Total predictions: {len(results):,}")
         print(f"   High confidence (>0.7): {len(results[results['confidence'] == 'High']):,}")
         print(f"   Medium confidence (0.5-0.7): {len(results[results['confidence'] == 'Medium']):,}")
-        
+        print(f"   Low confidence (<0.5): {len(results[results['confidence'] == 'Low']):,}")
+
         if args.lookup_names:
             approved = results[results.get('approval_status', '') == 'Approved']
             if len(approved) > 0:
