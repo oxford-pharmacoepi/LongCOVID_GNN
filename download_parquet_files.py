@@ -116,10 +116,15 @@ def process_directory(parquet_dir):
             html_content = f.read()
         
         # Construct the base URL
-        # Extract from the directory structure
+        # Extract version and dataset from the directory structure
+        # Example: raw_data/21.06/indication/ -> version=21.06, dataset=indication
         rel_path = str(parquet_dir).split('raw_data/')[-1]
-        # Fix: Add the missing /output/etl/ part to match OpenTargets URL structure
-        base_url = f"https://ftp.ebi.ac.uk/pub/databases/opentargets/platform/{rel_path.replace('/parquet/', '/output/etl/parquet/')}/"
+        parts = rel_path.split('/')
+        version = parts[0]  # e.g., '21.06'
+        dataset = parts[1] if len(parts) > 1 else ''  # e.g., 'indication'
+        
+        # Construct proper OpenTargets URL
+        base_url = f"https://ftp.ebi.ac.uk/pub/databases/opentargets/platform/{version}/output/etl/parquet/{dataset}/"
         
         # Parse parquet files from HTML
         parquet_files = parse_html_index(html_content, base_url)
@@ -145,7 +150,6 @@ def process_directory(parquet_dir):
             
             # Skip if file already exists and has reasonable size
             if local_path.exists() and local_path.stat().st_size > 1000:
-                print(f"Skipping {filename} (already exists)")
                 success_count += 1
                 continue
             
@@ -172,6 +176,34 @@ def main():
         print("Please run create_raw_data_folders.py first to create the directory structure.")
         sys.exit(1)
     
+    # Define datasets to download
+    # Core datasets
+    CORE_DATASETS = [
+        'indication',
+        'molecule', 
+        'diseases',
+        'targets',
+        'associationByOverallDirect'
+    ]
+    
+    # New datasets for edge features and node enrichment
+    EDGE_FEATURE_DATASETS = [
+        'mechanismOfAction',    
+        'interaction',           
+        'drugWarnings',        
+        'knownDrugsAggregated', 
+    ]
+    
+    ALL_DATASETS = CORE_DATASETS + EDGE_FEATURE_DATASETS
+    
+    print("\nDatasets to download:")
+    print("  Core datasets (5):")
+    for ds in CORE_DATASETS:
+        print(f"    - {ds}")
+    print(f"\n  New datasets for edge features (5):")
+    for ds in EDGE_FEATURE_DATASETS:
+        print(f"    - {ds}")
+    
     # Find all parquet directories with index files across all versions
     all_parquet_dirs = []
     
@@ -182,9 +214,8 @@ def main():
             # Look for directories with index.html files
             for item in version_dir.rglob("index.html"):
                 parquet_dir = item.parent
-                # Only include directories that look like parquet directories
-                if any(dataset in str(parquet_dir) for dataset in 
-                      ['indication', 'molecule', 'diseases', 'targets', 'associationByOverallDirect']):
+                # Check if directory matches any of our target datasets
+                if any(dataset in str(parquet_dir) for dataset in ALL_DATASETS):
                     if parquet_dir not in all_parquet_dirs:
                         all_parquet_dirs.append(parquet_dir)
     
@@ -193,7 +224,7 @@ def main():
         print("Please run create_raw_data_folders.py first to download index files.")
         sys.exit(1)
     
-    print(f"Found {len(all_parquet_dirs)} directories to process:")
+    print(f"\nFound {len(all_parquet_dirs)} directories to process:")
     for parquet_dir in sorted(all_parquet_dirs):
         print(f"  - {parquet_dir}")
     
@@ -246,7 +277,7 @@ def main():
                         parquet_dir.rmdir()
                         print(f"     Removed empty parquet/ directory")
             
-            print("   ✅ Data restructuring completed!")
+            print(" Data restructuring completed!")
             
         except Exception as e:
             print(f"   Error during restructuring: {e}")

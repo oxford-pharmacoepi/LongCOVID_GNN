@@ -11,6 +11,7 @@ Strategies implemented:
 3. Degree-matched sampling
 4. Feature-similarity sampling
 5. Mixed strategy sampling
+6. Temporal-aware sampling (prevents leakage from future positive edges)
 """
 
 import torch
@@ -21,20 +22,98 @@ from typing import List, Tuple, Set, Dict, Optional
 from tqdm import tqdm
 
 
+def validate_temporal_consistency(train_negatives: Set[Tuple[int, int]], 
+                                   val_positives: Set[Tuple[int, int]], 
+                                   test_positives: Set[Tuple[int, int]]) -> Dict[str, int]:
+    """
+    Validate that negative edges don't appear as positive edges in future time periods.
+    
+    Args:
+        train_negatives: Set of negative edges used in training
+        val_positives: Set of positive edges in validation set
+        test_positives: Set of positive edges in test set
+        
+    Returns:
+        Dictionary with statistics about temporal leakage
+    """
+    print("\n" + "="*80)
+    print("TEMPORAL CONSISTENCY VALIDATION")
+    print("="*80)
+    
+    # Check for leakage
+    val_leakage = train_negatives & val_positives
+    test_leakage = train_negatives & test_positives
+    total_leakage = val_leakage | test_leakage
+    
+    stats = {
+        'total_train_negatives': len(train_negatives),
+        'val_positives': len(val_positives),
+        'test_positives': len(test_positives),
+        'val_leakage_count': len(val_leakage),
+        'test_leakage_count': len(test_leakage),
+        'total_leakage_count': len(total_leakage),
+        'leakage_percentage': (len(total_leakage) / len(train_negatives) * 100) if train_negatives else 0
+    }
+    
+    print(f"\nTraining negatives: {stats['total_train_negatives']:,}")
+    print(f"Validation positives: {stats['val_positives']:,}")
+    print(f"Test positives: {stats['test_positives']:,}")
+    print(f"\n  LEAKAGE DETECTED:")
+    print(f"  - Validation leakage: {stats['val_leakage_count']:,} edges ({stats['val_leakage_count']/len(val_positives)*100:.2f}% of val positives)")
+    print(f"  - Test leakage: {stats['test_leakage_count']:,} edges ({stats['test_leakage_count']/len(test_positives)*100:.2f}% of test positives)")
+    print(f"  - Total unique leakage: {stats['total_leakage_count']:,} edges ({stats['leakage_percentage']:.2f}% of train negatives)")
+    
+    if len(total_leakage) > 0:
+        print(f"\n  WARNING: {len(total_leakage)} training negatives appear as future positives!")
+        print("   This causes temporal leakage and unreliable evaluation.")
+        print("   Recommendation: Exclude these edges from negative sampling.")
+    else:
+        print(f"\n✓ No temporal leakage detected - training negatives are clean!")
+    
+    print("="*80 + "\n")
+    
+    return stats
+
+
+def filter_negatives_by_future_positives(negative_candidates: List[Tuple[int, int]],
+                                          future_positives: Set[Tuple[int, int]]) -> List[Tuple[int, int]]:
+    """
+    Remove negative candidates that appear as positives in future time periods.
+    
+    Args:
+        negative_candidates: List of candidate negative edges
+        future_positives: Set of positive edges from validation and/or test sets
+        
+    Returns:
+        Filtered list of negative candidates
+    """
+    original_count = len(negative_candidates)
+    filtered = [edge for edge in negative_candidates if edge not in future_positives]
+    removed_count = original_count - len(filtered)
+    
+    if removed_count > 0:
+        print(f"  Filtered out {removed_count:,} negative candidates that are future positives ({removed_count/original_count*100:.2f}%)")
+    
+    return filtered
+
+
 class NegativeSampler:
     """
     Base class for negative sampling strategies.
     All sampling strategies should inherit from this class.
     """
     
-    def __init__(self, seed: int = 42):
+    def __init__(self, seed: int = 42, future_positives: Optional[Set[Tuple[int, int]]] = None):
         """
         Initialise sampler.
         
         Args:
             seed: Random seed for reproducibility
+            future_positives: Set of edges that are positive in validation/test sets
+                             (to prevent temporal leakage)
         """
         self.seed = seed
+        self.future_positives = future_positives or set()
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
@@ -61,6 +140,26 @@ class NegativeSampler:
     def get_name(self) -> str:
         """Return the name of the sampling strategy."""
         return self.__class__.__name__
+    
+    def _filter_candidates(self, candidates: List[Tuple[int, int]], positive_edges: Set[Tuple[int, int]]) -> List[Tuple[int, int]]:
+        """
+        Filter candidates to remove positives and future positives.
+        
+        Args:
+            candidates: List of candidate edges
+            positive_edges: Set of current positive edges
+            
+        Returns:
+            Filtered list of valid negative candidates
+        """
+        # Remove current positives
+        valid = set(candidates) - positive_edges
+        
+        # Remove future positives (temporal leakage prevention)
+        if self.future_positives:
+            valid = valid - self.future_positives
+        
+        return list(valid)
 
 
 class RandomNegativeSampler(NegativeSampler):
@@ -76,8 +175,8 @@ class RandomNegativeSampler(NegativeSampler):
                **kwargs) -> List[Tuple[int, int]]:
         """Sample random negatives from non-positive pairs."""
         
-        # Filter out positive edges
-        negative_candidates = list(set(all_possible_pairs) - positive_edges)
+        # Filter out positive edges and future positives
+        negative_candidates = self._filter_candidates(all_possible_pairs, positive_edges)
         
         # Sample
         if len(negative_candidates) < num_samples:
@@ -96,16 +195,27 @@ class HardNegativeSampler(NegativeSampler):
     If not enough hard negatives exist, supplements with random negatives.
     """
     
-    def __init__(self, seed: int = 42, fallback_to_random: bool = True):
+    def __init__(self, 
+                 seed: int = 42, 
+                 fallback_to_random: bool = True, 
+                 future_positives: Optional[Set[Tuple[int, int]]] = None,
+                 max_cn_threshold: Optional[int] = None,
+                 min_cn_threshold: int = 1):
         """
         Initialise hard negative sampler.
         
         Args:
             seed: Random seed
             fallback_to_random: If True, supplement with random negatives when hard negatives run out
+            future_positives: Set of future positive edges to exclude
+            max_cn_threshold: Maximum common neighbors to consider (prevents sampling potential positives)
+                             If None, no upper limit. Recommended: 5-10 for drug-disease networks
+            min_cn_threshold: Minimum common neighbors to consider as "hard" (default: 1)
         """
-        super().__init__(seed)
+        super().__init__(seed, future_positives)
         self.fallback_to_random = fallback_to_random
+        self.max_cn_threshold = max_cn_threshold
+        self.min_cn_threshold = min_cn_threshold
     
     def sample(self, 
                positive_edges: Set[Tuple[int, int]], 
@@ -116,6 +226,8 @@ class HardNegativeSampler(NegativeSampler):
         """
         Sample the hardest negatives by ranking all candidates by common neighbors.
         Falls back to random sampling if not enough hard negatives exist.
+        
+        Filters out negatives with too many common neighbors (likely unlabeled positives).
         
         Args:
             positive_edges: Set of positive edges
@@ -131,6 +243,10 @@ class HardNegativeSampler(NegativeSampler):
             raise ValueError("edge_index required for hard negative sampling")
         
         print(f"Sampling hard negatives (target: {num_samples:,})...")
+        if self.max_cn_threshold is not None:
+            print(f"  CN range filter: [{self.min_cn_threshold}, {self.max_cn_threshold}]")
+        else:
+            print(f"  CN minimum threshold: {self.min_cn_threshold}")
         
         # Build adjacency list
         adj_list = defaultdict(set)
@@ -140,7 +256,7 @@ class HardNegativeSampler(NegativeSampler):
             adj_list[dst].add(src)
         
         # Compute common neighbors for all negative candidates
-        candidate_pool = list(set(all_possible_pairs) - positive_edges)
+        candidate_pool = self._filter_candidates(all_possible_pairs, positive_edges)
         
         print(f"Computing common neighbors for {len(candidate_pool):,} negative candidates...")
         cn_scores = []
@@ -152,6 +268,12 @@ class HardNegativeSampler(NegativeSampler):
             common_neighbors = src_neighbors & dst_neighbors
             cn_count = len(common_neighbors)
             
+            # Filter by CN thresholds
+            if cn_count < self.min_cn_threshold:
+                continue  # Too easy
+            if self.max_cn_threshold is not None and cn_count > self.max_cn_threshold:
+                continue  # Too hard (likely unlabeled positive)
+            
             cn_scores.append((cn_count, src, dst))
         
         # Sort by common neighbor count (descending - hardest first)
@@ -162,24 +284,29 @@ class HardNegativeSampler(NegativeSampler):
             max_cn = cn_scores[0][0]
             min_cn = cn_scores[-1][0]
             avg_cn = np.mean([score[0] for score in cn_scores])
-            print(f"\nCommon neighbor statistics:")
+            print(f"\nCommon neighbor statistics (after filtering):")
             print(f"  Min: {min_cn}, Max: {max_cn}, Avg: {avg_cn:.2f}")
+            print(f"  Total candidates in range: {len(cn_scores):,}")
             
             # Show distribution of top candidates
             top_k = min(10, len(cn_scores))
             print(f"\nTop {top_k} hardest negatives have CN counts: {[s[0] for s in cn_scores[:top_k]]}")
             
-            # Print distribution: count how many edges have each CN count
+            # Print distribution
             from collections import Counter
             cn_distribution = Counter([score[0] for score in cn_scores])
             print(f"\nDistribution of edges by common neighbor count:")
-            print(f"{'CN':>5} | {'Count':>8} | {'%':>6}")
-            print("-" * 25)
-            # Sort by CN count (descending) and show top 20
+            print(f"{'CN':>5} | {'Count':>8} | {'%':>8}")
+            print("-" * 27)
             for cn_count in sorted(cn_distribution.keys(), reverse=True)[:50]:
                 count = cn_distribution[cn_count]
                 percentage = (count / len(cn_scores)) * 100
-                print(f"{cn_count:5d} | {count:8,d} | {percentage:5.2f}%")
+                if percentage < 0.01:
+                    print(f"{cn_count:5d} | {count:8,d} | {percentage:7.4f}%")
+                elif percentage < 1.0:
+                    print(f"{cn_count:5d} | {count:8,d} | {percentage:7.3f}%")
+                else:
+                    print(f"{cn_count:5d} | {count:8,d} | {percentage:7.2f}%")
         
         # Check if we have enough hard negatives
         num_available = len(cn_scores)
@@ -199,7 +326,7 @@ class HardNegativeSampler(NegativeSampler):
         
         else:
             # Not enough hard negatives - need to supplement with random
-            print(f"\n Only {num_available:,} hard negatives available (need {num_samples:,})")
+            print(f"\n  Only {num_available:,} hard negatives available (need {num_samples:,})")
             
             if not self.fallback_to_random:
                 print(f"  Fallback disabled - returning all {num_available:,} available hard negatives only")
@@ -230,7 +357,7 @@ class HardNegativeSampler(NegativeSampler):
             # Shuffle to mix hard and random
             random.shuffle(all_negatives)
             
-            print(f"\n Selected {len(all_negatives):,} total negatives:")
+            print(f"\n✓ Selected {len(all_negatives):,} total negatives:")
             print(f"  - {num_hard:,} hard negatives ({100*num_hard/len(all_negatives):.1f}%)")
             print(f"  - {len(random_negatives):,} random negatives ({100*len(random_negatives)/len(all_negatives):.1f}%)")
             
@@ -244,15 +371,16 @@ class DegreeMatchedNegativeSampler(NegativeSampler):
     to those in positive samples.
     """
     
-    def __init__(self, degree_tolerance: float = 0.3, seed: int = 42):
+    def __init__(self, degree_tolerance: float = 0.3, seed: int = 42, future_positives: Optional[Set[Tuple[int, int]]] = None):
         """
         Initialise degree-matched sampler.
         
         Args:
             degree_tolerance: Relative tolerance for degree matching (0.3 = ±30%)
             seed: Random seed
+            future_positives: Set of future positive edges to exclude
         """
-        super().__init__(seed)
+        super().__init__(seed, future_positives)
         self.degree_tolerance = degree_tolerance
     
     def sample(self, 
@@ -300,7 +428,7 @@ class DegreeMatchedNegativeSampler(NegativeSampler):
         
         # Find negative candidates with similar degrees
         negative_candidates = []
-        candidate_pool = list(set(all_possible_pairs) - positive_edges)
+        candidate_pool = self._filter_candidates(all_possible_pairs, positive_edges)
         random.shuffle(candidate_pool)
         
         for src, dst in tqdm(candidate_pool, desc="Finding degree-matched negatives"):
@@ -331,15 +459,16 @@ class FeatureSimilarityNegativeSampler(NegativeSampler):
     Samples negatives where nodes have similar features to positive pairs.
     """
     
-    def __init__(self, similarity_threshold: float = 0.5, seed: int = 42):
+    def __init__(self, similarity_threshold: float = 0.5, seed: int = 42, future_positives: Optional[Set[Tuple[int, int]]] = None):
         """
         Initialise feature-similarity sampler.
         
         Args:
             similarity_threshold: Minimum cosine similarity for node features
             seed: Random seed
+            future_positives: Set of future positive edges to exclude
         """
-        super().__init__(seed)
+        super().__init__(seed, future_positives)
         self.similarity_threshold = similarity_threshold
     
     def sample(self, 
@@ -383,7 +512,7 @@ class FeatureSimilarityNegativeSampler(NegativeSampler):
         
         # Find similar negatives
         negative_candidates = []
-        candidate_pool = list(set(all_possible_pairs) - positive_edges)
+        candidate_pool = self._filter_candidates(all_possible_pairs, positive_edges)
         random.shuffle(candidate_pool)
         
         for src, dst in tqdm(candidate_pool, desc="Finding feature-similar negatives"):
@@ -413,7 +542,7 @@ class FeatureSimilarityNegativeSampler(NegativeSampler):
 
 class MixedNegativeSampler(NegativeSampler):
     """
-    Mixed strategy: Combine multiple sampling strategies.
+    Mixed strategy: Combine multiple sampling strategies with adaptive weighting.
     Useful for getting diverse negative samples.
     """
     
@@ -421,35 +550,112 @@ class MixedNegativeSampler(NegativeSampler):
                  strategy_weights: Dict[str, float] = None,
                  degree_tolerance: float = 0.3,
                  similarity_threshold: float = 0.5,
-                 seed: int = 42):
+                 seed: int = 42,
+                 future_positives: Optional[Set[Tuple[int, int]]] = None,
+                 adaptive: bool = False,
+                 max_cn_threshold: Optional[int] = None,
+                 min_cn_threshold: int = 1):
         """
         Initialise mixed sampler.
         
         Args:
             strategy_weights: Dict mapping strategy names to their weights
                 Example: {'hard': 0.5, 'degree_matched': 0.3, 'random': 0.2}
+                If None, uses recommended defaults
             degree_tolerance: Passed to DegreeMatchedNegativeSampler
             similarity_threshold: Passed to FeatureSimilarityNegativeSampler
             seed: Random seed
+            future_positives: Set of future positive edges to exclude
+            adaptive: If True, enables curriculum learning
+            max_cn_threshold: Maximum common neighbors for hard negatives (prevents hidden positives)
+                             Recommended: 5-10 for drug-disease networks
+            min_cn_threshold: Minimum common neighbors for hard negatives
         """
-        super().__init__(seed)
+        super().__init__(seed, future_positives)
         
         if strategy_weights is None:
             strategy_weights = {
+                'hard': 0.5,           # Moderate hard negatives
+                'degree_matched': 0.3, # Structural similarity control
+                'random': 0.2          # Random for diversity
+        
+        self.strategy_weights = strategy_weights
+        self.adaptive = adaptive
+        self.training_progress = 0.0  # For curriculum learning (0 = start, 1 = end)
+        
+        # Initialise sub-samplers with CN thresholds to avoid hidden positives
+        self.samplers = {
+            'hard': HardNegativeSampler(
+                seed=seed, 
+                future_positives=future_positives,
+                max_cn_threshold=max_cn_threshold,  
+                min_cn_threshold=min_cn_threshold,
+                fallback_to_random=True
+            ),
+            'degree_matched': DegreeMatchedNegativeSampler(
+                degree_tolerance=degree_tolerance, 
+                seed=seed, 
+                future_positives=future_positives
+            ),
+            'random': RandomNegativeSampler(seed=seed, future_positives=future_positives),
+            'feature_similar': FeatureSimilarityNegativeSampler(
+                similarity_threshold=similarity_threshold, 
+                seed=seed, 
+                future_positives=future_positives
+            )
+        }
+    
+    def set_training_progress(self, epoch: int, total_epochs: int):
+        """
+        Update training progress for curriculum learning.
+        
+        Args:
+            epoch: Current epoch (0-indexed)
+            total_epochs: Total number of training epochs
+        """
+        self.training_progress = epoch / max(total_epochs - 1, 1)
+    
+    def get_adaptive_weights(self) -> Dict[str, float]:
+        """
+        Get adaptive weights based on training progress (curriculum learning).
+        
+        Strategy:
+        - Early training (0-30%): More random negatives (easier to learn)
+        - Mid training (30-70%): Balanced mix
+        - Late training (70-100%): More hard negatives (fine-tuning)
+        
+        Returns:
+            Adjusted strategy weights
+        """
+        if not self.adaptive:
+            return self.strategy_weights
+        
+        progress = self.training_progress
+        
+        # Curriculum schedule
+        if progress < 0.3:
+            # Early stage: Start with easier negatives
+            weights = {
+                'hard': 0.2,
+                'degree_matched': 0.3,
+                'random': 0.5
+            }
+        elif progress < 0.7:
+            # Mid stage: Balanced mix (use defaults)
+            weights = self.strategy_weights.copy()
+        else:
+            # Late stage: Focus on hard negatives for fine-tuning
+            weights = {
                 'hard': 0.6,
                 'degree_matched': 0.3,
                 'random': 0.1
             }
         
-        self.strategy_weights = strategy_weights
+        # Normalise to sum to 1.0
+        total = sum(weights.values())
+        weights = {k: v/total for k, v in weights.items()}
         
-        # Initialise sub-samplers
-        self.samplers = {
-            'hard': HardNegativeSampler(seed=seed),
-            'degree_matched': DegreeMatchedNegativeSampler(degree_tolerance=degree_tolerance, seed=seed),
-            'random': RandomNegativeSampler(seed=seed),
-            'feature_similar': FeatureSimilarityNegativeSampler(similarity_threshold=similarity_threshold, seed=seed)
-        }
+        return weights
     
     def sample(self, 
                positive_edges: Set[Tuple[int, int]], 
@@ -457,7 +663,7 @@ class MixedNegativeSampler(NegativeSampler):
                num_samples: int,
                **kwargs) -> List[Tuple[int, int]]:
         """
-        Sample negatives using mixed strategy.
+        Sample negatives using mixed strategy with optional curriculum learning.
         
         Args:
             positive_edges: Set of positive edges
@@ -469,17 +675,26 @@ class MixedNegativeSampler(NegativeSampler):
             List of mixed negative samples
         """
         
-        print(f"Sampling with mixed strategy: {self.strategy_weights}")
+        # Get current weights (adaptive or fixed)
+        current_weights = self.get_adaptive_weights()
+        
+        if self.adaptive:
+            print(f"Mixed strategy (adaptive, progress={self.training_progress:.2f}): {current_weights}")
+        else:
+            print(f"Mixed strategy (fixed): {current_weights}")
         
         all_negatives = []
         
         # Sample from each strategy according to weights
-        for strategy_name, weight in self.strategy_weights.items():
+        for strategy_name, weight in current_weights.items():
             if weight <= 0:
                 continue
             
             n_samples = int(num_samples * weight)
             if n_samples == 0:
+                continue
+            
+            if strategy_name not in self.samplers:
                 continue
             
             sampler = self.samplers[strategy_name]
@@ -501,7 +716,7 @@ class MixedNegativeSampler(NegativeSampler):
             deficit = num_samples - len(all_negatives)
             print(f"Filling {deficit} samples with random negatives")
             
-            random_sampler = RandomNegativeSampler(seed=self.seed)
+            random_sampler = RandomNegativeSampler(seed=self.seed, future_positives=self.future_positives)
             used_negatives = set(all_negatives)
             additional = random_sampler.sample(
                 positive_edges | used_negatives,
@@ -516,7 +731,7 @@ class MixedNegativeSampler(NegativeSampler):
         return all_negatives[:num_samples]
 
 
-def get_sampler(strategy: str = 'random', **kwargs) -> NegativeSampler:
+def get_sampler(strategy: str = 'random', future_positives: Optional[Set[Tuple[int, int]]] = None, **kwargs) -> NegativeSampler:
     """
     Factory function to get a negative sampler.
     
@@ -527,6 +742,8 @@ def get_sampler(strategy: str = 'random', **kwargs) -> NegativeSampler:
             - 'degree_matched': Degree-matched negatives
             - 'feature_similar': Feature-similar negatives
             - 'mixed': Mixed strategy
+        future_positives: Set of edges that are positive in validation/test sets
+                         (to prevent temporal leakage)
         **kwargs: Additional arguments for the sampler
         
     Returns:
@@ -544,4 +761,4 @@ def get_sampler(strategy: str = 'random', **kwargs) -> NegativeSampler:
     if strategy not in samplers:
         raise ValueError(f"Unknown strategy: {strategy}. Choose from {list(samplers.keys())}")
     
-    return samplers[strategy](**kwargs)
+    return samplers[strategy](future_positives=future_positives, **kwargs)

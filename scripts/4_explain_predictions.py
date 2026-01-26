@@ -115,9 +115,13 @@ class LinkPredictor(nn.Module):
         """Set the target drug-disease pair for explanation."""
         self.target_edge = (drug_idx, disease_idx)
     
-    def forward(self, x, edge_index, index=None):
-        """Forward pass compatible with GNNExplainer."""
-        z = self.gnn(x, edge_index)  # Get node embeddings
+    def forward(self, x, edge_index, edge_attr=None, index=None):
+        """Forward pass compatible with GNNExplainer, supporting edge features."""
+        # Pass edge features to GNN if provided
+        if edge_attr is not None:
+            z = self.gnn(x, edge_index, edge_attr=edge_attr)
+        else:
+            z = self.gnn(x, edge_index)
         
         # Use provided index or fall back to stored target_edge
         if index is not None:
@@ -214,6 +218,14 @@ class GNNExplainerAnalyzer:
             sub_x = self.graph.x[subset].float().to(self.device)
             edge_index = edge_index.to(self.device)
             
+            # Handle edge features if they exist in the graph
+            has_edge_attr = hasattr(self.graph, 'edge_attr') and self.graph.edge_attr is not None
+            if has_edge_attr:
+                # Extract edge attributes for the subgraph edges
+                sub_edge_attr = self.graph.edge_attr[edge_mask].float().to(self.device)
+            else:
+                sub_edge_attr = None
+            
             # Map drug and disease indices to subgraph
             drug_sub_idx = mapping[0].item()
             disease_sub_idx = mapping[1].item()
@@ -221,8 +233,11 @@ class GNNExplainerAnalyzer:
             # Set target for subgraph
             self.link_predictor.set_target_edge(drug_sub_idx, disease_sub_idx)
             
-            # Explain on subgraph
-            explanation = self.explainer(x=sub_x, edge_index=edge_index)
+            # Explain on subgraph - pass edge_attr if available
+            if sub_edge_attr is not None:
+                explanation = self.explainer(x=sub_x, edge_index=edge_index, edge_attr=sub_edge_attr)
+            else:
+                explanation = self.explainer(x=sub_x, edge_index=edge_index)
             
             # Process results
             explanation_data = self._process_explanation(
@@ -236,7 +251,9 @@ class GNNExplainerAnalyzer:
             return explanation_data
             
         except Exception as e:
-            print(f"Error generating explanation for Drug {drug_idx} -> Disease {disease_idx}: {e}")
+            import traceback
+            print(f"Error generating explanation for Drug {drug_idx} -> Disease {disease_idx}: {str(e)}")
+            print(f"Traceback: {traceback.format_exc()}")
             return None
     
     def _process_explanation(self, explanation, orig_drug_idx, orig_disease_idx, 
@@ -393,22 +410,16 @@ def load_actual_mappings(mappings_dir):
 
 
 def load_fp_predictions(predictions_path, mappings_dir=None):
-    """Load false positive predictions from CSV or PyTorch file with proper index mapping."""
+    """Load false positive predictions from CSV or PyTorch file."""
     print(f"Loading FP predictions from {predictions_path}")
-    
-    # Load actual mappings if directory provided
-    drug_name_to_idx = None
-    disease_name_to_idx = None
-    if mappings_dir and os.path.exists(mappings_dir):
-        drug_name_to_idx, disease_name_to_idx = load_actual_mappings(mappings_dir)
     
     if predictions_path.endswith('.csv'):
         df = pd.read_csv(predictions_path)
+        print(f"  CSV loaded with {len(df)} rows and columns: {df.columns.tolist()}")
         
         # Handle different possible column names
         confidence_col = None
         for col in ['confident_score', 'confidence_score', 'prediction', 'probability']:
-            if col in df.columns:
                 confidence_col = col
                 break
         
@@ -416,114 +427,40 @@ def load_fp_predictions(predictions_path, mappings_dir=None):
             raise ValueError(f"No confidence column found. Available: {df.columns.tolist()}")
         
         fp_pairs = []
-        skipped_count = 0
         
-        for _, row in df.iterrows():
-            drug_name = row['drug_name']
-            disease_name = row['disease_name']
+        # Check if CSV already has indices
+        has_indices = 'drug_idx' in df.columns and 'disease_idx' in df.columns
+        
+        if has_indices:
+            # Use indices directly from CSV 
+            print("Using drug_idx and disease_idx directly from CSV")
+            for _, row in df.iterrows():
+                fp_pairs.append({
+                    'drug_name': row['drug_name'],
+                    'disease_name': row['disease_name'],
+                    'drug_idx': int(row['drug_idx']),
+                    'disease_idx': int(row['disease_idx']),
+                    'confidence': float(row[confidence_col])
+                })
             
-            # Try to get actual indices from mappings first
-            if drug_name_to_idx is not None and disease_name_to_idx is not None:
-                drug_idx = drug_name_to_idx.get(drug_name)
-                disease_idx = disease_name_to_idx.get(disease_name)
-                
-                # If direct lookup fails, try to extract index from generic name
-                if drug_idx is None and drug_name.startswith('Drug_'):
-                    try:
-                        potential_idx = int(drug_name.split('_')[1])
-                        # Check if this index exists in the range of mapped drugs
-                        drug_indices = list(drug_name_to_idx.values())
-                        if potential_idx in drug_indices:
-                            drug_idx = potential_idx
-                    except (ValueError, IndexError):
-                        pass
-                
-                if disease_idx is None and disease_name.startswith('Disease_'):
-                    try:
-                        potential_idx = int(disease_name.split('_')[1])
-                        # Check if this index exists in the range of mapped diseases
-                        disease_indices = list(disease_name_to_idx.values())
-                        if potential_idx in disease_indices:
-                            disease_idx = potential_idx
-                    except (ValueError, IndexError):
-                        pass
-                
-                if drug_idx is None or disease_idx is None:
-                    if skipped_count < 5:  # Only print first few warnings
-                        print(f"Warning: Skipping {drug_name} -> {disease_name} (not found in mappings)")
-                    skipped_count += 1
-                    continue
-                
-                drug_idx = int(drug_idx)
-                disease_idx = int(disease_idx)
-            else:
-                # Last resort fallback: extract indices directly from generic names only
-                print("Warning: No mappings found. Attempting to extract indices from names with 'Drug_' or 'Disease_' prefix.")
-                try:
-                    if drug_name.startswith('Drug_'):
-                        drug_idx = int(drug_name.split('_')[1])
-                    else:
-                        print(f"Error: Cannot extract drug index from '{drug_name}' (must start with 'Drug_')")
-                        skipped_count += 1
-                        continue
-                        
-                    if disease_name.startswith('Disease_'):
-                        disease_idx = int(disease_name.split('_')[1])
-                    else:
-                        print(f"Error: Cannot extract disease index from '{disease_name}' (must start with 'Disease_'")
-                        skipped_count += 1
-                        continue
-                except (ValueError, IndexError) as e:
-                    print(f"Error: Could not extract indices from {drug_name} -> {disease_name}: {e}")
-                    skipped_count += 1
-                    continue
+            print(f"Loaded {len(fp_pairs)} FP predictions from CSV")
+        else:
+            # Fallback: try to load mappings and map names to indices
+            print("Warning: CSV doesn't have indices, attempting to map from names")
+            drug_name_to_idx = None
+            disease_name_to_idx = None
             
-            fp_pairs.append({
-                'drug_name': drug_name,
-                'disease_name': disease_name,
-                'drug_idx': drug_idx,
-                'disease_idx': disease_idx,
-                'confidence': float(row[confidence_col])
-            })
-        
-        if skipped_count > 5:
-            print(f"Warning: Skipped {skipped_count} total predictions")
-        
-        print(f"Loaded {len(fp_pairs)} FP predictions from CSV")
-        
-    elif predictions_path.endswith('.pt'):
-        predictions = torch.load(predictions_path, weights_only=False)
-        
-        fp_pairs = []
-        skipped_count = 0
-        
-        for i, pred in enumerate(predictions):
-            if len(pred) >= 3:
-                drug_name, disease_name, confidence = pred[0], pred[1], float(pred[2])
+            if mappings_dir and os.path.exists(mappings_dir):
+                drug_name_to_idx, disease_name_to_idx = load_actual_mappings(mappings_dir)
+            
+            skipped_count = 0
+            for _, row in df.iterrows():
+                drug_name = row['drug_name']
+                disease_name = row['disease_name']
                 
-                # Try to get actual indices from mappings first
-                if drug_name_to_idx is not None and disease_name_to_idx is not None:
+                if drug_name_to_idx and disease_name_to_idx:
                     drug_idx = drug_name_to_idx.get(drug_name)
                     disease_idx = disease_name_to_idx.get(disease_name)
-                    
-                    # If direct lookup fails, try to extract index from generic name
-                    if drug_idx is None and drug_name.startswith('Drug_'):
-                        try:
-                            potential_idx = int(drug_name.split('_')[1])
-                            drug_indices = list(drug_name_to_idx.values())
-                            if potential_idx in drug_indices:
-                                drug_idx = potential_idx
-                        except (ValueError, IndexError):
-                            pass
-                    
-                    if disease_idx is None and disease_name.startswith('Disease_'):
-                        try:
-                            potential_idx = int(disease_name.split('_')[1])
-                            disease_indices = list(disease_name_to_idx.values())
-                            if potential_idx in disease_indices:
-                                disease_idx = potential_idx
-                        except (ValueError, IndexError):
-                            pass
                     
                     if drug_idx is None or disease_idx is None:
                         if skipped_count < 5:
@@ -531,36 +468,41 @@ def load_fp_predictions(predictions_path, mappings_dir=None):
                         skipped_count += 1
                         continue
                     
-                    drug_idx = int(drug_idx)
-                    disease_idx = int(disease_idx)
+                    fp_pairs.append({
+                        'drug_name': drug_name,
+                        'disease_name': disease_name,
+                        'drug_idx': int(drug_idx),
+                        'disease_idx': int(disease_idx),
+                        'confidence': float(row[confidence_col])
+                    })
                 else:
-                    # Last resort fallback
-                    try:
-                        if drug_name.startswith('Drug_'):
-                            drug_idx = int(drug_name.split('_')[1])
-                        else:
-                            skipped_count += 1
-                            continue
-                            
-                        if disease_name.startswith('Disease_'):
-                            disease_idx = int(disease_name.split('_')[1])
-                        else:
-                            skipped_count += 1
-                            continue
-                    except (ValueError, IndexError):
-                        skipped_count += 1
-                        continue
-                
+                    print(f"Error: No mappings available and CSV doesn't have indices")
+                    break
+            
+            if skipped_count > 5:
+                print(f"Warning: Skipped {skipped_count} total predictions")
+            
+            print(f"Loaded {len(fp_pairs)} FP predictions from CSV")
+        
+    elif predictions_path.endswith('.pt'):
+        predictions = torch.load(predictions_path, weights_only=False)
+        
+        fp_pairs = []
+        for pred in predictions:
+            if len(pred) >= 5:
+                # Format: [drug_name, disease_name, confidence, drug_idx, disease_idx]
+                drug_name, disease_name, confidence, drug_idx, disease_idx = pred[:5]
                 fp_pairs.append({
                     'drug_name': drug_name,
                     'disease_name': disease_name,
-                    'drug_idx': drug_idx,
-                    'disease_idx': disease_idx,
-                    'confidence': confidence
+                    'drug_idx': int(drug_idx),
+                    'disease_idx': int(disease_idx),
+                    'confidence': float(confidence)
                 })
-        
-        if skipped_count > 5:
-            print(f"Warning: Skipped {skipped_count} total predictions")
+            elif len(pred) >= 3:
+                # Fallback format: [drug_name, disease_name, confidence]
+                print("Warning: .pt file doesn't have indices, skipping predictions without indices")
+                break
         
         print(f"Loaded {len(fp_pairs)} FP predictions from PyTorch file")
     
@@ -741,6 +683,10 @@ def real_faithfulness_test(explanations_dict, model, graph, n_tests=50):
     link_predictor = LinkPredictor(model)
     link_predictor.eval()
     
+    # Check if graph has edge features
+    has_edge_attr = hasattr(graph, 'edge_attr') and graph.edge_attr is not None
+    edge_attr = graph.edge_attr if has_edge_attr else None
+    
     for i, (pair_key, exp_data) in enumerate(test_explanations):
         if i % 10 == 0:
             print(f"   Testing faithfulness {i+1}/{len(test_explanations)}")
@@ -754,7 +700,10 @@ def real_faithfulness_test(explanations_dict, model, graph, n_tests=50):
         
         # Get original prediction
         with torch.no_grad():
-            original_logit = link_predictor(graph.x, graph.edge_index)
+            if has_edge_attr:
+                original_logit = link_predictor(graph.x, graph.edge_index, edge_attr=edge_attr)
+            else:
+                original_logit = link_predictor(graph.x, graph.edge_index)
             original_pred = torch.sigmoid(original_logit).item()
         
         # Remove top attributed nodes
@@ -771,7 +720,10 @@ def real_faithfulness_test(explanations_dict, model, graph, n_tests=50):
         modified_x[top_nodes] = 0
         
         with torch.no_grad():
-            modified_logit = link_predictor(modified_x, graph.edge_index)
+            if has_edge_attr:
+                modified_logit = link_predictor(modified_x, graph.edge_index, edge_attr=edge_attr)
+            else:
+                modified_logit = link_predictor(modified_x, graph.edge_index)
             modified_pred_attributed = torch.sigmoid(modified_logit).item()
         
         # Test with random nodes removed
@@ -782,7 +734,10 @@ def real_faithfulness_test(explanations_dict, model, graph, n_tests=50):
         modified_x_random[random_nodes] = 0
         
         with torch.no_grad():
-            modified_logit_random = link_predictor(modified_x_random, graph.edge_index)
+            if has_edge_attr:
+                modified_logit_random = link_predictor(modified_x_random, graph.edge_index, edge_attr=edge_attr)
+            else:
+                modified_logit_random = link_predictor(modified_x_random, graph.edge_index)
             modified_pred_random = torch.sigmoid(modified_logit_random).item()
         
         # Calculate performance drops
@@ -1023,13 +978,41 @@ def main():
         # Get model configuration from config
         model_config = config.get_model_config()
         
-        model = model_class(
-            in_channels=graph.x.size(1),
-            hidden_channels=model_config['hidden_channels'],
-            out_channels=model_config['out_channels'],
-            num_layers=model_config['num_layers'],
-            dropout_rate=model_config['dropout_rate']
-        ).to(device)
+        # Check if graph has edge features and initialise model accordingly
+        has_edge_attr = hasattr(graph, 'edge_attr') and graph.edge_attr is not None
+        if has_edge_attr:
+            print(f"✓ Graph has edge features: {graph.edge_attr.shape}")
+            edge_dim = graph.edge_attr.size(1)
+            
+            # For TransformerModel, pass edge_dim to constructor
+            if model_name == 'Transformer':
+                model = model_class(
+                    in_channels=graph.x.size(1),
+                    hidden_channels=model_config['hidden_channels'],
+                    out_channels=model_config['out_channels'],
+                    num_layers=model_config['num_layers'],
+                    dropout_rate=model_config['dropout_rate'],
+                    edge_dim=edge_dim
+                ).to(device)
+            else:
+                # For other models, pass edge_dim if they support it
+                model = model_class(
+                    in_channels=graph.x.size(1),
+                    hidden_channels=model_config['hidden_channels'],
+                    out_channels=model_config['out_channels'],
+                    num_layers=model_config['num_layers'],
+                    dropout_rate=model_config['dropout_rate'],
+                    edge_dim=edge_dim
+                ).to(device)
+        else:
+            print("  Note: No edge features found")
+            model = model_class(
+                in_channels=graph.x.size(1),
+                hidden_channels=model_config['hidden_channels'],
+                out_channels=model_config['out_channels'],
+                num_layers=model_config['num_layers'],
+                dropout_rate=model_config['dropout_rate']
+            ).to(device)
         
         model.load_state_dict(torch.load(model_path, map_location=device, weights_only=False))
         model.eval()

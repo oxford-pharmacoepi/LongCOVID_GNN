@@ -62,12 +62,15 @@ def generate_tensor(source_list, target_list, source_mapping, target_mapping):
     return edge_index_tensor
 
 
-def extract_edges(table, source_mapping, target_mapping, return_edge_list=False, return_edge_set=False):
+def extract_edges(table, source_mapping, target_mapping, return_edge_list=False, return_edge_set=False, debug=False):
     """Extract edges from a PyArrow table."""
     source = table.column(0).combine_chunks()
     targets = table.column(1).combine_chunks()
   
     edges = []
+    missing_sources = set()
+    missing_targets = set()
+    
     for i in range(len(source)):
         source_id = source[i].as_py()
         target_list = targets.slice(i, 1).to_pylist()[0]
@@ -76,10 +79,31 @@ def extract_edges(table, source_mapping, target_mapping, return_edge_list=False,
         if not isinstance(target_list, list):
             target_list = [target_list]
         
+        # Track missing mappings
+        if source_id not in source_mapping:
+            missing_sources.add(source_id)
+        
         # Create edges for each target
         for target_id in target_list:
+            if target_id not in target_mapping:
+                missing_targets.add(target_id)
+            
             if source_id in source_mapping and target_id in target_mapping:
                 edges.append((source_mapping[source_id], target_mapping[target_id]))
+    
+    # Debug output if requested
+    if debug and (missing_sources or missing_targets):
+        print(f"        [DEBUG] Missing mappings:")
+        print(f"          Sources not in mapping: {len(missing_sources)}")
+        if len(missing_sources) <= 10:
+            print(f"            Examples: {list(missing_sources)[:10]}")
+        else:
+            print(f"            Examples: {list(missing_sources)[:10]}")
+        print(f"          Targets not in mapping: {len(missing_targets)}")
+        if len(missing_targets) <= 10:
+            print(f"            Examples: {list(missing_targets)[:10]}")
+        else:
+            print(f"            Examples: {list(missing_targets)[:10]}")
 
     if return_edge_list:
         return edges
@@ -382,8 +406,8 @@ def calculate_bootstrap_ci(y_true, y_pred_proba, y_pred_binary, n_bootstrap=1000
     return ci_results
 
 
-def calculate_metrics(y_true, y_prob, y_pred):
-    """Calculate comprehensive evaluation metrics."""
+def calculate_metrics(y_true, y_prob, y_pred, k_values=[10, 50, 100, 200, 500]):
+    """Calculate comprehensive evaluation metrics including Recall@K."""
     from sklearn.metrics import confusion_matrix
     
     # Basic metrics
@@ -400,6 +424,9 @@ def calculate_metrics(y_true, y_prob, y_pred):
     # Advanced metrics
     auc_score = roc_auc_score(y_true, y_prob)
     apr_score = average_precision_score(y_true, y_prob)
+    
+    # Ranking metrics
+    ranking_metrics = calculate_ranking_metrics(y_true, y_prob, k_values)
     
     # Additional metrics
     ppv = precision  # Positive Predictive Value
@@ -422,8 +449,134 @@ def calculate_metrics(y_true, y_prob, y_pred):
             'TP': int(tp), 'FP': int(fp), 
             'TN': int(tn), 'FN': int(fn)
         },
-        'ci_results': ci_results
+        'ci_results': ci_results,
+        'ranking_metrics': ranking_metrics
     }
+
+
+def calculate_recall_at_k(y_true, y_prob, k_values=[10, 50, 100, 200, 500]):
+    """
+    Calculate Recall@K for ranking-based evaluation.
+    
+    This metric is crucial for drug repurposing where we care about finding
+    as many true positives as possible in the top-K predictions.
+    
+    Args:
+        y_true: Binary labels (1 for positive, 0 for negative)
+        y_prob: Predicted probabilities/scores
+        k_values: List of K values to evaluate
+    
+    Returns:
+        Dictionary with Recall@K for each K value
+    """
+    # Get indices of true positives
+    true_positives = np.where(y_true == 1)[0]
+    n_true_positives = len(true_positives)
+    
+    if n_true_positives == 0:
+        return {f'recall@{k}': 0.0 for k in k_values}
+    
+    # Sort predictions by probability (descending)
+    sorted_indices = np.argsort(y_prob)[::-1]
+    
+    recall_at_k = {}
+    for k in k_values:
+        # Get top-K predictions
+        top_k_indices = sorted_indices[:k]
+        
+        # Count how many true positives are in top-K
+        true_positives_in_top_k = np.sum(y_true[top_k_indices] == 1)
+        
+        # Calculate recall
+        recall = true_positives_in_top_k / n_true_positives
+        recall_at_k[f'recall@{k}'] = recall
+    
+    return recall_at_k
+
+
+def calculate_precision_at_k(y_true, y_prob, k_values=[10, 50, 100, 200, 500]):
+    """
+    Calculate Precision@K for ranking-based evaluation.
+    
+    Args:
+        y_true: Binary labels (1 for positive, 0 for negative)
+        y_prob: Predicted probabilities/scores
+        k_values: List of K values to evaluate
+    
+    Returns:
+        Dictionary with Precision@K for each K value
+    """
+    # Sort predictions by probability (descending)
+    sorted_indices = np.argsort(y_prob)[::-1]
+    
+    precision_at_k = {}
+    for k in k_values:
+        # Get top-K predictions
+        top_k_indices = sorted_indices[:k]
+        
+        # Count how many are true positives
+        true_positives_in_top_k = np.sum(y_true[top_k_indices] == 1)
+        
+        # Calculate precision
+        precision = true_positives_in_top_k / k if k > 0 else 0
+        precision_at_k[f'precision@{k}'] = precision
+    
+    return precision_at_k
+
+
+def calculate_ndcg_at_k(y_true, y_prob, k_values=[10, 50, 100, 200, 500]):
+    """
+    Calculate Normalized Discounted Cumulative Gain (NDCG@K).
+    
+    NDCG measures ranking quality considering position: higher-ranked
+    true positives contribute more to the score.
+    
+    Args:
+        y_true: Binary labels (1 for positive, 0 for negative)
+        y_prob: Predicted probabilities/scores
+        k_values: List of K values to evaluate
+    
+    Returns:
+        Dictionary with NDCG@K for each K value
+    """
+    from sklearn.metrics import ndcg_score
+    
+    ndcg_at_k = {}
+    for k in k_values:
+        try:
+            # Calculate NDCG@K
+            score = ndcg_score(y_true.reshape(1, -1), y_prob.reshape(1, -1), k=k)
+            ndcg_at_k[f'ndcg@{k}'] = score
+        except:
+            ndcg_at_k[f'ndcg@{k}'] = 0.0
+    
+    return ndcg_at_k
+
+
+def calculate_ranking_metrics(y_true, y_prob, k_values=[10, 50, 100, 200, 500]):
+    """
+    Calculate comprehensive ranking metrics for drug repurposing evaluation.
+    
+    Args:
+        y_true: Binary labels
+        y_prob: Predicted probabilities
+        k_values: List of K values to evaluate
+    
+    Returns:
+        Dictionary with all ranking metrics
+    """
+    metrics = {}
+    
+    # Calculate Recall@K
+    metrics.update(calculate_recall_at_k(y_true, y_prob, k_values))
+    
+    # Calculate Precision@K
+    metrics.update(calculate_precision_at_k(y_true, y_prob, k_values))
+    
+    # Calculate NDCG@K
+    metrics.update(calculate_ndcg_at_k(y_true, y_prob, k_values))
+    
+    return metrics
 
 
 # Graph Analysis Functions
@@ -604,30 +757,224 @@ def custom_edges(disease_similarity_network, trial_edges, molecule_similarity_ne
                 disease_key_mapping, drug_key_mapping):
     """Generate custom edges for enhanced graph connectivity."""
     
+    print("\n" + "="*80)
+    print("CUSTOM_EDGES FUNCTION - CREATING DISEASE SIMILARITY NETWORK")
+    print("="*80)
+    
     custom_edges = []
 
     # Disease similarity network edges
     if disease_similarity_network:
-        disease_descendants_table = filtered_disease_table.select(['id', 'descendants']).flatten()
-        disease_children_table = filtered_disease_table.select(['id', 'children']).flatten()
-        disease_ancestors_table = filtered_disease_table.select(['id', 'ancestors']).flatten()
-
-        custom_edges.extend(extract_edges(disease_descendants_table, disease_key_mapping, disease_key_mapping, return_edge_list=True))
-        custom_edges.extend(extract_edges(disease_children_table, disease_key_mapping, disease_key_mapping, return_edge_list=True))
-        custom_edges.extend(extract_edges(disease_ancestors_table, disease_key_mapping, disease_key_mapping, return_edge_list=True))
+        print("\n>>> Processing Disease Similarity Network...")
+        print(f"    Disease table shape: {filtered_disease_table.shape}")
+        print(f"    Disease key mapping size: {len(disease_key_mapping)}")
+        
+        # Create disease-disease edges based on shared ancestors
+        # This connects diseases that have common ancestors in the ontology
+        try:
+            # Method 1: Similarity edges from shared ancestors
+            print("\n    [1] Creating similarity edges from shared ancestors...")
+            similarity_edges = create_disease_similarity_edges_from_ancestors(
+                filtered_disease_table, 
+                disease_key_mapping, 
+                min_shared_ancestors=2  # Require at least 2 shared ancestors
+            )
+            custom_edges.extend(similarity_edges)
+            
+            # Method 2: Direct hierarchy edges (parent-child within our disease set)
+            print("\n    [2] Creating direct hierarchy edges...")
+            hierarchy_edges = create_disease_hierarchy_edges(
+                filtered_disease_table,
+                disease_key_mapping
+            )
+            custom_edges.extend(hierarchy_edges)
+            
+        except Exception as e:
+            print(f"        ERROR creating disease edges: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        print(f"\n    Total disease similarity edges collected: {len(custom_edges)}")
 
     # Trial edges
     if trial_edges:
+        print("\n>>> Processing Trial Edges...")
         molecule_trial_table = filtered_molecule_table.select(['id', 'linkedDiseases']).flatten()
-        custom_edges.extend(extract_edges(molecule_trial_table, drug_key_mapping, disease_key_mapping, return_edge_list=True))
+        trial_edges_list = extract_edges(molecule_trial_table, drug_key_mapping, disease_key_mapping, return_edge_list=True, debug=False)
+        print(f"    Extracted {len(trial_edges_list)} trial edges")
+        custom_edges.extend(trial_edges_list)
 
     # Molecule similarity network edges
     if molecule_similarity_network:
+        print("\n>>> Processing Molecule Similarity Network...")
         molecule_parents_table = filtered_molecule_table.select(['id', 'parentId']).flatten()
         molecule_children_table = filtered_molecule_table.select(['id', 'childChemblIds']).flatten()
 
-        custom_edges.extend(extract_edges(molecule_parents_table, drug_key_mapping, drug_key_mapping, return_edge_list=True))
-        custom_edges.extend(extract_edges(molecule_children_table, drug_key_mapping, drug_key_mapping, return_edge_list=True))
+        parent_edges = extract_edges(molecule_parents_table, drug_key_mapping, drug_key_mapping, return_edge_list=True, debug=False)
+        children_edges = extract_edges(molecule_children_table, drug_key_mapping, drug_key_mapping, return_edge_list=True, debug=False)
+        
+        print(f"    Extracted {len(parent_edges)} parent edges")
+        print(f"    Extracted {len(children_edges)} children edges")
+        
+        custom_edges.extend(parent_edges)
+        custom_edges.extend(children_edges)
 
+    # Handle empty case : return tensor with shape [2, 0]
+    print(f"\n>>> FINAL RESULT: {len(custom_edges)} total custom edges")
+    print("="*80 + "\n")
+    
+    if len(custom_edges) == 0:
+        return torch.empty((2, 0), dtype=torch.long)
+    
     custom_edge_tensor = torch.tensor(custom_edges, dtype=torch.long).t().contiguous()
     return custom_edge_tensor
+
+
+def create_disease_similarity_edges_from_ancestors(disease_table, disease_key_mapping, min_shared_ancestors=1):
+    """
+    Create disease-disease similarity edges based on shared DIRECT PARENT ancestor.
+    
+    Instead of treating ancestors as nodes, this function connects diseases
+    that share the same DIRECT PARENT (first ancestor only) in the disease ontology hierarchy.
+    
+    Args:
+        disease_table: PyArrow table with 'id' and 'ancestors' columns
+        disease_key_mapping: Mapping from disease ID to node index
+        min_shared_ancestors: Minimum number of shared ancestors required to create edge
+    
+    Returns:
+        List of disease-disease edges (tuples of node indices)
+    """
+    import pandas as pd
+    import numpy as np
+    from collections import defaultdict
+    
+    print(f"    Building disease similarity network from shared DIRECT PARENT...")
+    
+    # Extract disease IDs and their ancestors
+    disease_df = disease_table.select(['id', 'ancestors']).to_pandas()
+    
+    # Build mapping: ancestor -> list of diseases that have this as direct parent
+    ancestor_to_diseases = defaultdict(set)
+    
+    for _, row in disease_df.iterrows():
+        disease_id = row['id']
+        ancestors = row['ancestors']
+        
+        # Skip if disease is not in our node mapping
+        if disease_id not in disease_key_mapping:
+            continue
+        
+        # Handle None or empty ancestors
+        if ancestors is None:
+            continue
+        
+        # Convert numpy array to list if needed
+        if isinstance(ancestors, np.ndarray):
+            ancestors = ancestors.tolist()
+        
+        # Skip if not a list or empty
+        if not isinstance(ancestors, list) or len(ancestors) == 0:
+            continue
+        
+        # Use only the first ancestor (direct parent), index 0
+        if len(ancestors) > 0:
+            direct_parent = ancestors[0]
+            ancestor_to_diseases[direct_parent].add(disease_id)
+    
+    print(f"    Found {len(ancestor_to_diseases)} unique direct parents")
+    
+    # Build disease-disease edges based on shared ancestors
+    edges = []
+    shared_ancestor_counts = defaultdict(int)
+    
+    # For each ancestor, connect all diseases that share it
+    for ancestor_id, disease_set in ancestor_to_diseases.items():
+        disease_list = list(disease_set)
+        
+        # Create edges between all pairs of diseases that share this ancestor
+        for i in range(len(disease_list)):
+            for j in range(i + 1, len(disease_list)):
+                disease_1 = disease_list[i]
+                disease_2 = disease_list[j]
+                
+                # Track how many ancestors these diseases share
+                shared_ancestor_counts[(disease_1, disease_2)] += 1
+    
+    # Create edges for disease pairs that share at least min_shared_ancestors
+    for (disease_1, disease_2), count in shared_ancestor_counts.items():
+        if count >= min_shared_ancestors:
+            idx1 = disease_key_mapping[disease_1]
+            idx2 = disease_key_mapping[disease_2]
+            
+            # Add bidirectional edges
+            edges.append((idx1, idx2))
+            edges.append((idx2, idx1))
+    
+    print(f"    Created {len(edges)} disease-disease similarity edges (from direct parent)")
+    print(f"    Unique disease pairs: {len(edges) // 2}")
+    
+    return edges
+
+
+def create_disease_hierarchy_edges(disease_table, disease_key_mapping):
+    """
+    Create disease-disease edges using direct parent-child relationships.
+    
+    This preserves the disease ontology hierarchy by connecting diseases
+    that are directly related (parent-child, siblings via shared parent).
+    
+    Args:
+        disease_table: PyArrow table with 'id', 'children', 'descendants' columns
+        disease_key_mapping: Mapping from disease ID to node index
+    
+    Returns:
+        List of disease-disease edges (tuples of node indices)
+    """
+    import pandas as pd
+    import numpy as np
+    
+    print(f"    Building disease hierarchy edges...")
+    
+    edges = []
+    
+    # Check which columns are available
+    available_cols = ['id']
+    if 'children' in disease_table.column_names:
+        available_cols.append('children')
+    if 'descendants' in disease_table.column_names:
+        available_cols.append('descendants')
+    
+    disease_df = disease_table.select(available_cols).to_pandas()
+    
+    # Create edges from children relationships
+    if 'children' in available_cols:
+        for _, row in disease_df.iterrows():
+            parent_id = row['id']
+            children = row['children']
+            
+            if parent_id not in disease_key_mapping:
+                continue
+            
+            if children is None:
+                continue
+            
+            # Convert numpy array to list if needed
+            if isinstance(children, np.ndarray):
+                children = children.tolist()
+            
+            if not isinstance(children, list):
+                continue
+            
+            parent_idx = disease_key_mapping[parent_id]
+            
+            # Connect parent to children (if children are also in our graph)
+            for child_id in children:
+                if child_id in disease_key_mapping:
+                    child_idx = disease_key_mapping[child_id]
+                    edges.append((parent_idx, child_idx))
+                    edges.append((child_idx, parent_idx))  # Bidirectional edges
+    
+    print(f"    Created {len(edges)} disease hierarchy edges")
+    
+    return edges

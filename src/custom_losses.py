@@ -375,6 +375,104 @@ class BalancedFocalLoss(nn.Module):
         return loss.mean()
 
 
+class RankingAwareBCELoss(nn.Module):
+    """
+    Ranking-aware BCE loss that combines binary classification with ranking objectives.
+    
+    This loss helps prevent score compression by:
+    1. Standard BCE for classification
+    2. Margin ranking loss to separate positive and negative scores
+    3. Variance regularisation to encourage score spread
+    
+    Perfect for drug ranking where you need well-calibrated, spread-out scores.
+    """
+    
+    def __init__(self, 
+                 pos_weight: float = None,
+                 margin: float = 0.5,
+                 ranking_weight: float = 0.3,
+                 variance_weight: float = 0.1):
+        """
+        Initialize ranking-aware BCE loss.
+        
+        Args:
+            pos_weight: Weight for positive class (auto-computed if None)
+            margin: Minimum desired score gap between positives and negatives
+            ranking_weight: Weight for ranking component (0.0-1.0)
+            variance_weight: Weight for variance regularization (0.0-1.0)
+        """
+        super().__init__()
+        self.pos_weight = pos_weight
+        self.margin = margin
+        self.ranking_weight = ranking_weight
+        self.variance_weight = variance_weight
+    
+    def forward(self, logits, targets, **kwargs):
+        """
+        Compute ranking-aware loss.
+        
+        Args:
+            logits: Model predictions (before sigmoid)
+            targets: Ground truth labels (0 or 1)
+            
+        Returns:
+            Scalar loss value
+        """
+        # 1. Standard weighted BCE
+        if self.pos_weight is None:
+            n_pos = (targets == 1).sum().float()
+            n_neg = (targets == 0).sum().float()
+            pos_weight = n_neg / (n_pos + 1e-8)
+        else:
+            pos_weight = self.pos_weight
+        
+        weights = torch.where(
+            targets == 1,
+            torch.full_like(targets, pos_weight, dtype=torch.float32),
+            torch.ones_like(targets, dtype=torch.float32)
+        )
+        
+        bce_loss = F.binary_cross_entropy_with_logits(logits, targets.float(), reduction='none')
+        bce_loss = (bce_loss * weights).mean()
+        
+        # 2. Ranking loss: encourage margin between pos and neg
+        pos_mask = targets == 1
+        neg_mask = targets == 0
+        
+        if pos_mask.sum() > 0 and neg_mask.sum() > 0:
+            pos_scores = torch.sigmoid(logits[pos_mask])
+            neg_scores = torch.sigmoid(logits[neg_mask])
+            
+            # Compute pairwise ranking loss
+            # Want: pos_score - neg_score > margin
+            pos_expanded = pos_scores.unsqueeze(1)  # [n_pos, 1]
+            neg_expanded = neg_scores.unsqueeze(0)  # [1, n_neg]
+            
+            # Margin ranking: max(0, margin - (pos - neg))
+            ranking_loss = F.relu(self.margin - (pos_expanded - neg_expanded))
+            ranking_loss = ranking_loss.mean()
+            
+            # 3. Variance regularisation: penalise compressed scores
+            # Encourage both pos and neg to have spread
+            pos_var = pos_scores.var() if pos_scores.numel() > 1 else torch.tensor(0.0, device=logits.device)
+            neg_var = neg_scores.var() if neg_scores.numel() > 1 else torch.tensor(0.0, device=logits.device)
+            
+            # Negative variance loss to encourage higher variance
+            variance_loss = -torch.log(pos_var + 1e-6) - torch.log(neg_var + 1e-6)
+        else:
+            ranking_loss = torch.tensor(0.0, device=logits.device)
+            variance_loss = torch.tensor(0.0, device=logits.device)
+        
+        # Combine losses
+        total_loss = (
+            (1.0 - self.ranking_weight - self.variance_weight) * bce_loss +
+            self.ranking_weight * ranking_loss +
+            self.variance_weight * variance_loss
+        )
+        
+        return total_loss
+
+
 def get_loss_function(loss_type: str = 'standard_bce', **kwargs):
     """
     Factory function to get a loss function.
@@ -388,6 +486,7 @@ def get_loss_function(loss_type: str = 'standard_bce', **kwargs):
             - 'focal': Focal loss (for hard examples)
             - 'pu': Positive-Unlabeled learning loss (theoretical)
             - 'balanced_focal': Balanced focal loss (combination)
+            - 'ranking_aware_bce': Ranking-aware BCE loss (avoids score compression)
         **kwargs: Additional arguments for the loss function
         
     Returns:
@@ -404,6 +503,7 @@ def get_loss_function(loss_type: str = 'standard_bce', **kwargs):
         'focal': ['alpha', 'gamma'],
         'pu': ['prior', 'beta'],
         'balanced_focal': ['alpha', 'gamma', 'pos_weight'],
+        'ranking_aware_bce': ['pos_weight', 'margin', 'ranking_weight', 'variance_weight'],
     }
     
     if loss_type not in loss_param_mapping:
@@ -421,6 +521,7 @@ def get_loss_function(loss_type: str = 'standard_bce', **kwargs):
         'focal': lambda: FocalLoss(**filtered_kwargs),
         'pu': lambda: PULoss(**filtered_kwargs),
         'balanced_focal': lambda: BalancedFocalLoss(**filtered_kwargs),
+        'ranking_aware_bce': lambda: RankingAwareBCELoss(**filtered_kwargs),
     }
     
     return loss_functions[loss_type]()

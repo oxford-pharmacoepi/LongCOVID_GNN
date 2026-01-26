@@ -163,7 +163,9 @@ class ExperimentTracker:
         
         if val_metrics:
             for metric_name, metric_value in val_metrics.items():
-                mlflow.log_metric(f"val_{metric_name}", metric_value, step=epoch)
+                # Sanitise metric name for MLflow (replace @ with _)
+                sanitised_name = metric_name.replace('@', '_')
+                mlflow.log_metric(f"val_{sanitised_name}", metric_value, step=epoch)
     
     def log_test_metrics(self, test_metrics):
         """
@@ -173,7 +175,9 @@ class ExperimentTracker:
             test_metrics: Dictionary of test metrics
         """
         for metric_name, metric_value in test_metrics.items():
-            mlflow.log_metric(f"test_{metric_name}", metric_value)
+            # Sanitise metric name for MLflow (replace @ with _)
+            sanitised_name = metric_name.replace('@', '_')
+            mlflow.log_metric(f"test_{sanitised_name}", metric_value)
     
     def log_model(self, model, model_path=None):
         """

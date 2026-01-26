@@ -31,9 +31,19 @@ class GCNModel(torch.nn.Module):
         # Final output layer
         self.final_layer = torch.nn.Linear(hidden_channels, out_channels)
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, edge_attr=None):
+        """
+        Forward pass with optional edge attributes.
+        
+        Args:
+            x: Node features
+            edge_index: Edge connectivity
+            edge_attr: Optional edge features (currently not used by GCNConv, but kept for API consistency)
+        """
         # Ensure input tensor is float32
         x = x.float()
+        
+        # Note: GCNConv doesn't natively support edge_attr, but we keep the parameter for API consistency across models. 
         
         # First GCNConv layer
         x = self.conv1(x, edge_index)
@@ -55,9 +65,9 @@ class GCNModel(torch.nn.Module):
 
 
 class TransformerModel(torch.nn.Module):
-    """Graph Transformer model."""
+    """Graph Transformer model with edge feature support."""
     
-    def __init__(self, in_channels, hidden_channels, out_channels, num_layers=2, dropout_rate=0.5, heads=4, concat=False):
+    def __init__(self, in_channels, hidden_channels, out_channels, num_layers=2, dropout_rate=0.5, heads=4, concat=False, edge_dim=None):
         super(TransformerModel, self).__init__()
         self.num_layers = num_layers
         self.heads = heads
@@ -67,12 +77,12 @@ class TransformerModel(torch.nn.Module):
         # If concat=True, output is hidden_channels * heads, otherwise it's hidden_channels
         head_out_channels = hidden_channels * heads if concat else hidden_channels
 
-        # Initial TransformerConv layer
-        self.conv1 = TransformerConv(in_channels, hidden_channels, heads=heads, concat=concat)
+        # Initial TransformerConv layer with edge feature support
+        self.conv1 = TransformerConv(in_channels, hidden_channels, heads=heads, concat=concat, edge_dim=edge_dim)
 
         # Additional TransformerConv layers
         self.conv_list = torch.nn.ModuleList(
-            [TransformerConv(head_out_channels, hidden_channels, heads=heads, concat=concat) for _ in range(num_layers - 1)]
+            [TransformerConv(head_out_channels, hidden_channels, heads=heads, concat=concat, edge_dim=edge_dim) for _ in range(num_layers - 1)]
         )
 
         # Layer normalization and dropout
@@ -82,19 +92,27 @@ class TransformerModel(torch.nn.Module):
         # Final output layer
         self.final_layer = torch.nn.Linear(head_out_channels, out_channels)
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, edge_attr=None):
+        """
+        Forward pass with optional edge attributes.
+        
+        Args:
+            x: Node features
+            edge_index: Edge connectivity
+            edge_attr: Optional edge features (supported by TransformerConv)
+        """
         # Ensure input tensor is float32
         x = x.float()
         
-        # First TransformerConv layer
-        x = self.conv1(x, edge_index)
+        # First TransformerConv layer (with edge features if available)
+        x = self.conv1(x, edge_index, edge_attr=edge_attr)
         x = self.ln(x)
         x = F.relu(x)
         x = self.dropout(x)
 
         # Additional TransformerConv layers
         for k in range(self.num_layers - 1):
-            x = self.conv_list[k](x, edge_index)
+            x = self.conv_list[k](x, edge_index, edge_attr=edge_attr)
             x = self.ln(x)
             if k < self.num_layers - 2:  # Apply activation and dropout except on the last hidden layer
                 x = F.relu(x)
@@ -140,9 +158,19 @@ class SAGEModel(torch.nn.Module):
         nn.init.xavier_uniform_(self.final_layer.weight, gain=0.1)
         nn.init.zeros_(self.final_layer.bias)
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, edge_attr=None):
+        """
+        Forward pass with optional edge attributes.
+        
+        Args:
+            x: Node features
+            edge_index: Edge connectivity
+            edge_attr: Optional edge features (currently not used by SAGEConv, but kept for API consistency)
+        """
         # Ensure input tensor is float32
         x = x.float()
+        
+        # Note: SAGEConv doesn't natively support edge_attr, but we keep the parameter for API consistency across models
         
         # First layer
         x = self.conv1(x, edge_index)

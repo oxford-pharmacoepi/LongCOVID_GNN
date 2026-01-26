@@ -12,18 +12,23 @@ import argparse
 import json
 import os
 from pathlib import Path
-import random 
+import random
+from typing import Optional, Set, Tuple
 from src.negative_sampling import get_sampler
+import pandas as pd
+import numpy as np
 
 # Import from shared modules
 from src.utils import (
     set_seed, enable_full_reproducibility, get_indices_from_keys,
     generate_pairs, extract_edges, boolean_encode, normalize, 
-    cat_encode, pad_feature_matrix, align_features, standard_graph_analysis
+    cat_encode, pad_feature_matrix, align_features, standard_graph_analysis,
+    custom_edges
 )
 from src.data_processing import DataProcessor, detect_data_mode, create_full_dataset
 from src.config import get_config, create_custom_config
 from src.mlflow_tracker import ExperimentTracker
+from src.edge_features import extract_moa_features 
 
 
 class GraphBuilder:
@@ -57,18 +62,58 @@ class GraphBuilder:
         self.mappings = self.processor.load_mappings(mappings_path)
         
         # Load processed tables
-        import pandas as pd
-        
         processed_dir = f"{self.config.paths['processed']}tables/"
         self.molecule_df = pd.read_csv(f"{processed_dir}processed_molecules.csv")
         self.indication_df = pd.read_csv(f"{processed_dir}processed_indications.csv")
         self.disease_df = pd.read_csv(f"{processed_dir}processed_diseases.csv")
         
-        # Handle list columns
+        # Handle list columns in indication_df
         if 'approvedIndications' in self.indication_df.columns:
             self.indication_df['approvedIndications'] = self.indication_df['approvedIndications'].apply(
                 lambda x: eval(x) if isinstance(x, str) and x.startswith('[') else x
             )
+        
+        # Handle list columns in disease_df (for disease-disease edges)
+        def parse_numpy_array_string(value):
+            """Parse numpy array string format: "['item1' 'item2' 'item3']" """
+            if not isinstance(value, str):
+                return value if isinstance(value, list) else []
+            
+            # Remove brackets and quotes, then split by whitespace
+            value = value.strip()
+            if value.startswith('[') and value.endswith(']'):
+                # Remove outer brackets
+                inner = value[1:-1].strip()
+                if not inner:
+                    return []
+                
+                # Split by whitespace and remove quotes
+                items = []
+                current_item = ""
+                in_quotes = False
+                
+                for char in inner:
+                    if char == "'" or char == '"':
+                        in_quotes = not in_quotes
+                    elif char in (' ', '\n', '\t') and not in_quotes:
+                        if current_item:
+                            items.append(current_item)
+                            current_item = ""
+                    else:
+                        current_item += char
+                
+                # Add last item
+                if current_item:
+                    items.append(current_item)
+                
+                return items
+            
+            return []
+        
+        list_columns = ['ancestors', 'descendants', 'children', 'therapeuticAreas']
+        for col in list_columns:
+            if col in self.disease_df.columns:
+                self.disease_df[col] = self.disease_df[col].apply(parse_numpy_array_string)
         
         print("Pre-processed data loaded successfully")
     
@@ -262,7 +307,7 @@ class GraphBuilder:
         print(f"  - Therapeutic area features: {therapeutic_area_feature_matrix.shape}")
     
     def create_edges(self):
-        """Create edge indices."""
+        """Create edge indices and edge features."""
         print("Creating graph edges...")
         
         if self.data_mode == "processed":
@@ -287,13 +332,124 @@ class GraphBuilder:
             print(f"  Disease-Therapeutic: {self.disease_therapeutic_edges.shape}")
             print(f"  Disease-Gene: {self.disease_gene_edges.shape}")
             
+            # Extract custom edges (disease-disease, trial edges, molecule-molecule) if enabled
+            print("\nChecking for custom edge types...")
+            disease_similarity_enabled = self.config.network_config.get('disease_similarity_network', False)
+            trial_edges_enabled = self.config.network_config.get('trial_edges', False)
+            molecule_similarity_enabled = self.config.network_config.get('molecule_similarity_network', False)
+            
+            if disease_similarity_enabled or trial_edges_enabled or molecule_similarity_enabled:
+                print(f"  Disease similarity network: {disease_similarity_enabled}")
+                print(f"  Trial edges: {trial_edges_enabled}")
+                print(f"  Molecule similarity network: {molecule_similarity_enabled}")
+                
+                # Convert DataFrames to PyArrow tables for custom edge extraction
+                import pyarrow as pa
+                
+                # For disease table, explicitly set list column types
+                disease_schema = None
+                if disease_similarity_enabled:
+                    # Build schema with explicit list types for disease columns
+                    disease_schema_fields = []
+                    for col in self.disease_df.columns:
+                        if col in ['ancestors', 'descendants', 'children', 'therapeuticAreas']:
+                            # Explicitly mark as list of strings
+                            disease_schema_fields.append(pa.field(col, pa.list_(pa.string())))
+                        else:
+                            # Infer type from pandas dtype
+                            dtype = self.disease_df[col].dtype
+                            if dtype == 'object':
+                                pa_type = pa.string()
+                            elif dtype == 'int64':
+                                pa_type = pa.int64()
+                            elif dtype == 'float64':
+                                pa_type = pa.float64()
+                            elif dtype == 'bool':
+                                pa_type = pa.bool_()
+                            else:
+                                pa_type = pa.string()  # fallback
+                            disease_schema_fields.append(pa.field(col, pa_type))
+                    
+                    disease_schema = pa.schema(disease_schema_fields)
+                    print(f"\n  Building disease table with explicit schema:")
+                    print(f"    Total columns: {len(disease_schema_fields)}")
+                    print(f"    List columns: {[f.name for f in disease_schema_fields if pa.types.is_list(f.type)]}")
+                
+                disease_table = pa.Table.from_pandas(self.disease_df, schema=disease_schema)
+                molecule_table = pa.Table.from_pandas(self.molecule_df)
+                
+                if disease_similarity_enabled:
+                    print(f"\n  Disease table schema verification:")
+                    for col in ['id', 'ancestors', 'descendants', 'children']:
+                        if col in disease_table.column_names:
+                            col_type = disease_table.schema.field(col).type
+                            print(f"    {col}: {col_type}")
+                            # Quick sanity check - sample first few values
+                            col_data = disease_table.column(col).combine_chunks()
+                            if col in ['ancestors', 'descendants', 'children']:
+                                non_null = sum(1 for i in range(len(col_data)) if col_data[i].as_py() and len(col_data[i].as_py()) > 0)
+                                print(f"      Non-empty lists: {non_null}/{len(col_data)}")
+                                # Show first non-empty example
+                                for i in range(min(5, len(col_data))):
+                                    val = col_data[i].as_py()
+                                    if val and len(val) > 0:
+                                        print(f"      Example: {val[:3]}...")
+                                        break
+                            else:
+                                # Show first few IDs
+                                print(f"      Sample values: {[col_data[i].as_py() for i in range(min(3, len(col_data)))]}")
+                
+                # Call custom_edges() function
+                self.custom_edge_tensor = custom_edges(
+                    disease_similarity_network=disease_similarity_enabled,
+                    trial_edges=trial_edges_enabled,
+                    molecule_similarity_network=molecule_similarity_enabled,
+                    filtered_disease_table=disease_table,
+                    filtered_molecule_table=molecule_table,
+                    disease_key_mapping=self.mappings['disease_key_mapping'],
+                    drug_key_mapping=self.mappings['drug_key_mapping']
+                )
+                
+                print(f"  Custom edges created: {self.custom_edge_tensor.shape}")
+            else:
+                print("  No custom edges enabled - skipping")
+                self.custom_edge_tensor = torch.empty((2, 0), dtype=torch.long)
+            
         else:
             # Extract edges from raw data
             import pyarrow as pa
             
+            # Convert disease table to PyArrow with explicit schema for list columns
+            disease_similarity_enabled = self.config.network_config.get('disease_similarity_network', False)
+            
+            disease_schema = None
+            if disease_similarity_enabled:
+                # Build schema with explicit list types for disease columns
+                disease_schema_fields = []
+                for col in self.disease_df.columns:
+                    if col in ['ancestors', 'descendants', 'children', 'therapeuticAreas']:
+                        # Explicitly mark as list of strings
+                        disease_schema_fields.append(pa.field(col, pa.list_(pa.string())))
+                    else:
+                        # Infer type from pandas dtype
+                        dtype = self.disease_df[col].dtype
+                        if dtype == 'object':
+                            pa_type = pa.string()
+                        elif dtype == 'int64':
+                            pa_type = pa.int64()
+                        elif dtype == 'float64':
+                            pa_type = pa.float64()
+                        elif dtype == 'bool':
+                            pa_type = pa.bool_()
+                        else:
+                            pa_type = pa.string()  # fallback
+                        disease_schema_fields.append(pa.field(col, pa_type))
+                
+                disease_schema = pa.schema(disease_schema_fields)
+            
+            disease_table = pa.Table.from_pandas(self.disease_df, schema=disease_schema)
             molecule_table = pa.Table.from_pandas(self.molecule_df)
             indication_table = pa.Table.from_pandas(self.indication_df)
-            disease_table = pa.Table.from_pandas(self.disease_df)
             
             # Extract different edge types
             molecule_drugType_table = molecule_table.select(['id', 'drugType']).drop_null().flatten()
@@ -364,6 +520,33 @@ class GraphBuilder:
             print(f"  Gene-Reactome: {self.gene_reactome_edges.shape}")
             print(f"  Disease-Therapeutic: {self.disease_therapeutic_edges.shape}")
             print(f"  Disease-Gene: {self.disease_gene_edges.shape}")
+            
+            # Extract custom edges (disease-disease, trial edges, molecule-molecule) if enabled
+            print("\nChecking for custom edge types...")
+            disease_similarity_enabled = self.config.network_config.get('disease_similarity_network', False)
+            trial_edges_enabled = self.config.network_config.get('trial_edges', False)
+            molecule_similarity_enabled = self.config.network_config.get('molecule_similarity_network', False)
+            
+            if disease_similarity_enabled or trial_edges_enabled or molecule_similarity_enabled:
+                print(f"  Disease similarity network: {disease_similarity_enabled}")
+                print(f"  Trial edges: {trial_edges_enabled}")
+                print(f"  Molecule similarity network: {molecule_similarity_enabled}")
+                
+                # Call custom_edges() function
+                self.custom_edge_tensor = custom_edges(
+                    disease_similarity_network=disease_similarity_enabled,
+                    trial_edges=trial_edges_enabled,
+                    molecule_similarity_network=molecule_similarity_enabled,
+                    filtered_disease_table=disease_table,
+                    filtered_molecule_table=molecule_table,
+                    disease_key_mapping=self.mappings['disease_key_mapping'],
+                    drug_key_mapping=self.mappings['drug_key_mapping']
+                )
+                
+                print(f"  Custom edges created: {self.custom_edge_tensor.shape}")
+            else:
+                print("  No custom edges enabled - skipping")
+                self.custom_edge_tensor = torch.empty((2, 0), dtype=torch.long)
         
         # Combine all edges
         all_edges = [
@@ -375,6 +558,10 @@ class GraphBuilder:
             self.disease_gene_edges
         ]
         
+        # Add custom edges if they exist
+        if hasattr(self, 'custom_edge_tensor') and self.custom_edge_tensor.size(1) > 0:
+            all_edges.append(self.custom_edge_tensor)
+        
         # Filter out empty tensors
         non_empty_edges = [e for e in all_edges if e.size(1) > 0]
         
@@ -384,6 +571,12 @@ class GraphBuilder:
             self.all_edge_index = torch.empty((2, 0), dtype=torch.long)
         
         print(f"Created edges: {self.all_edge_index.size(1)} total")
+        
+        # Extract mechanismOfAction edge features for drug-gene edges
+        print("\n" + "="*80)
+        print("EXTRACTING EDGE FEATURES")
+        print("="*80)
+        self.create_edge_features()
         
         # Save edge tensors for future use (only when processing raw data)
         if self.data_mode == "raw":
@@ -397,12 +590,64 @@ class GraphBuilder:
             torch.save(self.disease_therapeutic_edges, f"{edge_dir}5_disease_therapeutic_edges.pt")
             torch.save(self.disease_gene_edges, f"{edge_dir}6_disease_gene_edges.pt")
     
+    def create_edge_features(self):
+        """Extract edge features from mechanismOfAction data."""
+        import pandas as pd
+        import os
+        
+        # Try to load mechanismOfAction data
+        try:
+            moa_path = self.config.paths.get('mechanismOfAction', None)
+            
+            if moa_path and os.path.exists(moa_path):
+                # Load mechanismOfAction data
+                moa_df = self.processor.load_mechanism_of_action(moa_path)
+                
+                # Extract features for drug-gene edges
+                self.drug_gene_edge_features = extract_moa_features(
+                    moa_df,
+                    self.mappings['drug_key_mapping'],
+                    self.mappings['gene_key_mapping'],
+                    self.molecule_gene_edges
+                )
+                
+                # Create padded edge features for all edges
+                # Since only drug-gene edges have features, we pad with zeros for other edge types
+                num_drug_gene_edges = self.molecule_gene_edges.shape[1]
+                total_edges = self.all_edge_index.shape[1]
+                feature_dim = self.drug_gene_edge_features.shape[1]
+                
+                # Create edge feature tensor for all edges
+                self.all_edge_features = torch.zeros((total_edges, feature_dim), dtype=torch.float32)
+                
+                # Find where drug-gene edges are in the concatenated edge tensor
+                # Order: drugType, disease, gene, reactome, therapeutic, disease-gene
+                edge_offset = (self.molecule_drugType_edges.shape[1] + 
+                              self.molecule_disease_edges.shape[1])
+                
+                # Copy drug-gene edge features to the correct position
+                self.all_edge_features[edge_offset:edge_offset + num_drug_gene_edges] = self.drug_gene_edge_features
+                
+                print(f"\n✓ Created edge feature matrix: {self.all_edge_features.shape}")
+                print(f"  - Drug-gene edges with features: {num_drug_gene_edges}")
+                print(f"  - Total edges: {total_edges}")
+                print(f"  - Feature dimension: {feature_dim}")
+                
+            else:
+                print(f"  Warning: mechanismOfAction data not found at {moa_path}")
+                print(f"  Skipping edge features - graph will use structure only")
+                self.all_edge_features = None
+                
+        except Exception as e:
+            print(f"  Error loading edge features: {e}")
+            print(f"  Skipping edge features - graph will use structure only")
+            self.all_edge_features = None
+    
     def create_train_val_test_splits(self):
-        """Create training, validation, and test splits with configurable negative sampling."""
+        """Create training, validation, and test splits with negative sampling."""
         print("Creating train/validation/test splits...")
         print(f"Negative sampling strategy: {self.config.negative_sampling_strategy}")
         print(f"Pos:Neg ratio: 1:{self.config.train_neg_ratio} (training), 1:{self.config.pos_neg_ratio} (val/test)")
-
 
         # Extract training edges 
         train_edges_set = set(zip(
@@ -447,40 +692,12 @@ class GraphBuilder:
         print(f"Validation positive edges: {len(new_val_edges_set)}")
         print(f"Test positive edges: {len(new_test_edges_set)}")
         
-        # Initialise the negative sampler based on config
-        print(f"\nInitialising {self.config.negative_sampling_strategy} negative sampler...")
-        
-        if self.config.negative_sampling_strategy == 'hard':
-            sampler = get_sampler('hard', seed=self.config.seed)
-        elif self.config.negative_sampling_strategy == 'mixed':
-            sampler = get_sampler(
-                'mixed',
-                strategy_weights=self.config.neg_sampling_params['strategy_weights'],
-                degree_tolerance=self.config.neg_sampling_params['degree_tolerance'],
-                similarity_threshold=self.config.neg_sampling_params['similarity_threshold'],
-                seed=self.config.seed
-            )
-        elif self.config.negative_sampling_strategy == 'degree_matched':
-            sampler = get_sampler(
-                'degree_matched',
-                degree_tolerance=self.config.neg_sampling_params['degree_tolerance'],
-                seed=self.config.seed
-            )
-        elif self.config.negative_sampling_strategy == 'feature_similar':
-            sampler = get_sampler(
-                'feature_similar',
-                similarity_threshold=self.config.neg_sampling_params['similarity_threshold'],
-                seed=self.config.seed
-            )
-        else:  # 'random' or default
-            sampler = get_sampler('random', seed=self.config.seed)
-        
         # Calculate total negatives needed
         train_true_pairs = list(train_edges_set)
         val_true_pairs = list(new_val_edges_set)
         test_true_pairs = list(new_test_edges_set)
         
-        num_train_negatives = len(train_true_pairs) * self.config.train_neg_ratio  # Configurable now!
+        num_train_negatives = len(train_true_pairs) * self.config.train_neg_ratio
         num_val_negatives = len(val_true_pairs) * self.config.pos_neg_ratio
         num_test_negatives = len(test_true_pairs) * self.config.pos_neg_ratio
         total_negatives_needed = num_train_negatives + num_val_negatives + num_test_negatives
@@ -491,36 +708,77 @@ class GraphBuilder:
         print(f"  Test: {num_test_negatives} (1:{self.config.pos_neg_ratio} ratio)")
         print(f"  TOTAL: {total_negatives_needed}")
         
-        # Sample all negatives at once using chosen strategy
         print("\n" + "="*80)
-        print(f"SAMPLING ALL NEGATIVES USING {self.config.negative_sampling_strategy.upper()} STRATEGY")
+        print(f"NEGATIVE SAMPLING ({self.config.negative_sampling_strategy.upper()})")
         print("="*80)
         
+        # Sample ALL negatives at once
+        all_positive_edges = train_edges_set | new_val_edges_set | new_test_edges_set
+        
+        print(f"\n✨ Sampling ALL {total_negatives_needed} negatives at once...")
+        sampler = self._create_sampler(future_positives=new_val_edges_set | new_test_edges_set)
         all_negative_pairs = sampler.sample(
-            positive_edges=train_edges_set | new_val_edges_set | new_test_edges_set,
+            positive_edges=all_positive_edges,
             all_possible_pairs=all_possible_pairs,
             num_samples=total_negatives_needed,
             edge_index=self.all_edge_index,
             node_features=self.all_features
         )
-        
         print(f"✓ Sampled {len(all_negative_pairs)} total negatives")
         
-        # Split negatives into train/val/test
-        print("\nSplitting negatives into train/val/test...")
+        # Are there duplicates in the sampled negatives?
+        negative_set = set(all_negative_pairs)
+        num_duplicates = len(all_negative_pairs) - len(negative_set)
+        if num_duplicates > 0:
+            print(f"   WARNING: Sampler returned {num_duplicates} DUPLICATE negatives!")
+            print(f"   This means the sampler's sample() method is not returning unique samples.")
+            print(f"   Deduplicating now...")
+            all_negative_pairs = list(negative_set)
+            print(f"   After deduplication: {len(all_negative_pairs)} unique negatives")
         
-        # Shuffle negatives before splitting (for fairness)
+        # Now split the negatives randomly across train/val/test
+        print(f"\n Randomly splitting negatives across train/val/test...")
         random.seed(self.config.seed)
-        random.shuffle(all_negative_pairs)
+        shuffled_negatives = list(all_negative_pairs)
+        random.shuffle(shuffled_negatives)
         
-        # Split by count
-        train_false_pairs = all_negative_pairs[:num_train_negatives]
-        val_false_pairs = all_negative_pairs[num_train_negatives:num_train_negatives + num_val_negatives]
-        test_false_pairs = all_negative_pairs[num_train_negatives + num_val_negatives:]
+        # Split into train/val/test
+        train_false_pairs = shuffled_negatives[:num_train_negatives]
+        val_false_pairs = shuffled_negatives[num_train_negatives:num_train_negatives + num_val_negatives]
+        test_false_pairs = shuffled_negatives[num_train_negatives + num_val_negatives:]
         
-        print(f"  Training negatives: {len(train_false_pairs)}")
-        print(f"  Validation negatives: {len(val_false_pairs)}")
-        print(f"  Test negatives: {len(test_false_pairs)}")
+        print(f" Train negatives: {len(train_false_pairs)}")
+        print(f" Val negatives: {len(val_false_pairs)}")
+        print(f" Test negatives: {len(test_false_pairs)}")
+        
+        # Verify splits
+        print("\n" + "="*80)
+        print("VERIFICATION")
+        print("="*80)
+        
+        train_neg_set = set(train_false_pairs)
+        val_neg_set = set(val_false_pairs)
+        test_neg_set = set(test_false_pairs)
+        all_pos_set = train_edges_set | new_val_edges_set | new_test_edges_set
+        
+        # Check: No negatives overlap with any positives
+        neg_pos_overlap = (train_neg_set | val_neg_set | test_neg_set) & all_pos_set
+        print(f"Negatives ∩ Positives: {len(neg_pos_overlap)} (should be 0)")
+        
+        # Check: No overlap between negative splits (by design they shouldn't overlap)
+        train_val_overlap = train_neg_set & val_neg_set
+        train_test_overlap = train_neg_set & test_neg_set
+        val_test_overlap = val_neg_set & test_neg_set
+        print(f"Train negatives ∩ Val negatives: {len(train_val_overlap)} (should be 0)")
+        print(f"Train negatives ∩ Test negatives: {len(train_test_overlap)} (should be 0)")
+        print(f"Val negatives ∩ Test negatives: {len(val_test_overlap)} (should be 0)")
+        
+        if neg_pos_overlap or train_val_overlap or train_test_overlap or val_test_overlap:
+            print("\n VERIFICATION FAILED!")
+        else:
+            print("\n ALL CHECKS PASSED!")
+        
+        print("="*80 + "\n")
         
         # Create training tensors
         train_labels = [1] * len(train_true_pairs) + [0] * len(train_false_pairs)
@@ -537,7 +795,6 @@ class GraphBuilder:
         self.test_edge_tensor = torch.tensor(test_true_pairs + test_false_pairs, dtype=torch.long)
         self.test_label_tensor = torch.tensor(test_labels, dtype=torch.long)
         
-        print("\n" + "="*80)
         print("SPLIT SUMMARY")
         print("="*80)
         print(f"Training: {len(train_true_pairs)} positive, {len(train_false_pairs)} negative (ratio 1:{self.config.train_neg_ratio})")
@@ -545,6 +802,27 @@ class GraphBuilder:
         print(f"Test: {len(test_true_pairs)} positive, {len(test_false_pairs)} negative (ratio 1:{self.config.pos_neg_ratio})")
         print(f"Negative sampling strategy: {self.config.negative_sampling_strategy}")
         print("="*80 + "\n")
+    
+    def _create_sampler(self, future_positives: Optional[Set[Tuple[int, int]]] = None):
+        """
+        Create a negative sampler instance based on the configured strategy.
+        
+        Args:
+            future_positives: Set of edges that should not be sampled as negatives
+                             (e.g., validation/test positives when sampling train negatives)
+        
+        Returns:
+            NegativeSampler instance
+        """
+        strategy = self.config.negative_sampling_strategy
+        params = self.config.neg_sampling_params or {}
+        
+        return get_sampler(
+            strategy=strategy,
+            future_positives=future_positives,
+            seed=self.config.seed,
+            **params
+        )
     
     def build_graph(self):
         """Build the final graph object."""
@@ -583,6 +861,8 @@ class GraphBuilder:
                 "neg_sampling_params": self.config.neg_sampling_params,
                 "network_config": self.config.network_config,
                 "seed": self.config.seed,
+                "edge_features_enabled": self.all_edge_features is not None, 
+                "edge_feature_dim": self.all_edge_features.shape[1] if self.all_edge_features is not None else 0,
             },
             "creation_timestamp": dt.datetime.now().isoformat(),
             "total_nodes": sum(node_info.values()),
@@ -599,6 +879,7 @@ class GraphBuilder:
             val_edge_label=self.val_label_tensor,
             test_edge_index=self.test_edge_tensor,
             test_edge_label=self.test_label_tensor,
+            edge_attr=self.all_edge_features, 
             metadata=metadata
         )
         

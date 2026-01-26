@@ -20,21 +20,20 @@ class Config:
         self.as_dataset = 'associationByOverallDirect'
         
         # Negative sampling configuration
-        self.negative_sampling_strategy = 'hard'  # Options: 'random', 'hard', 'degree_matched', 'feature_similar', 'mixed'
+        self.negative_sampling_strategy = 'mixed' # Options: 'random', 'hard', 'degree_matched', 'feature_similar', 'mixed'
         self.pos_neg_ratio = 10  # Ratio of negative to positive samples for val/test (1:x)
         self.train_neg_ratio = 10  # Ratio for training (1:x)
         self.neg_sampling_params = {
             'degree_tolerance': 0.3,         # For degree-matched sampling
             'similarity_threshold': 0.5,     # For feature-similarity sampling
-            'strategy_weights': {            # For mixed strategy
-                'hard': 0.6,
-                'degree_matched': 0.3,
-                'random': 0.1
-            }
+            'strategy_weights': {            # For mixed strategy 
+                'hard': 0.4,          
+                'degree_matched': 0.4,  
+                'random': 0.2            
         }
         
         # Loss function configuration
-        self.loss_function = 'standard_bce'  # Options: standard_bce (default), weighted_bce, focal, pu, confidence_weighted, balanced_focal
+        self.loss_function = 'ranking_aware_bce'  # Options: standard_bce (default), weighted_bce, focal, pu, confidence_weighted, balanced_focal, ranking_aware_bce
         self.loss_params = {
             'pos_weight': None,              # Auto-computed if None
             'neg_weight': 1.0,
@@ -42,11 +41,15 @@ class Config:
             'gamma': 2.0,                    # For focal loss
             'prior': 0.01,                   # For PU learning (1% of negatives might be hidden positives)
             'min_neg_weight': 0.1,           # For confidence-weighted loss
-            'max_neg_weight': 1.0            # For confidence-weighted loss
+            'max_neg_weight': 1.0,           # For confidence-weighted loss
+            'margin': 0.5,                   # For ranking loss - margin between pos and neg
+            'ranking_weight': 0.3            # Weight for ranking component (0.3 = 30% ranking, 70% BCE)
         }
         
         # Evaluation settings
-        self.primary_metric = 'apr'  # "auc", "apr", "f1", "accuracy"
+        self.primary_metric = 'apr'  # Changed from 'recall@k' to 'apr' - better for ranking with imbalanced data
+        self.recall_k = 100  # K value for Recall@K (used when primary_metric is "recall@k")
+        self.ranking_k_values = [10, 50, 100, 200, 500]  # K values to compute for all ranking metrics
         
         # Model selection
         self.model_choice = 'Transformer'  # Options: 'all', 'Transformer', 'GCN', 'SAGE'
@@ -60,7 +63,7 @@ class Config:
             'num_layers': 2,
             'dropout_rate': 0.4870800162873122,
             'num_epochs': 500,
-            'patience': 10,
+            'patience': 30,
             'batch_size': 1024,
             'heads': 2,
             'concat': True 
@@ -75,17 +78,18 @@ class Config:
         
         # Network settings
         self.network_config = {
-            'disease_similarity_network': False,
-            'molecule_similarity_network': False,
+            'disease_similarity_network': False,  # Enable disease-disease edges
+            'molecule_similarity_network': False,  # Enable molecule-molecule edges (K: still not fully tested)
             'reactome_network': True,
             'trial_edges': False
         }
         
         # Explainer settings
         self.explainer_config = {
-            'epochs': 50,
+            'epochs': 200,  
+            'lr': 0.01, 
             'sample_size': 1000,
-            'max_explanations': 1000,
+            'max_explanations': 50, 
             'fp_threshold': 0.7,
             'fp_top_k': 10000
         }
@@ -117,11 +121,15 @@ class Config:
             'val_indication': f"{self.general_path}/{self.validation_version}/indication",
             'test_indication': f"{self.general_path}/{self.test_version}/indication",
             'molecule': f"{self.general_path}/{self.training_version}/molecule",
-            'diseases': f"{self.general_path}/{self.training_version}/diseases",  # Fixed: diseases not disease
+            'diseases': f"{self.general_path}/{self.training_version}/diseases", 
             'val_diseases': f"{self.general_path}/{self.validation_version}/diseases",
             'test_diseases': f"{self.general_path}/{self.test_version}/diseases", 
-            'targets': f"{self.general_path}/{self.training_version}/targets",    # Fixed: targets not gene
-            'associations': f"{self.general_path}/{self.training_version}/{self.as_dataset}",  # This matches associationByOverallDirect
+            'targets': f"{self.general_path}/{self.training_version}/targets",  
+            'associations': f"{self.general_path}/{self.training_version}/{self.as_dataset}",  
+            'mechanismOfAction': f"{self.general_path}/{self.training_version}/mechanismOfAction",
+            'drugWarnings': f"{self.general_path}/{self.training_version}/drugWarnings",  # not yet implemented in graph
+            'interaction': f"{self.general_path}/{self.training_version}/interaction",   # not yet implemented in graph
+            'knownDrugsAggregated': f"{self.general_path}/{self.training_version}/knownDrugsAggregated",  # not yet implemented in graph
             'results': self.results_path,
             'processed': "processed_data/",
             'models': f"{self.results_path}/models/",

@@ -169,14 +169,42 @@ class ModelTrainer:
             self.tracker.log_param(f"{model_name}_dropout", self.model_config['dropout_rate'])
             self.tracker.log_param(f"{model_name}_primary_metric", primary_metric)
         
-        # Initialise model
-        model = model_class(
-            in_channels=graph.x.size(1),
-            hidden_channels=self.model_config['hidden_channels'],
-            out_channels=self.model_config['out_channels'],
-            num_layers=self.model_config['num_layers'],
-            dropout_rate=self.model_config['dropout_rate']
-        ).to(self.device)
+        # Check if graph has edge features
+        has_edge_attr = hasattr(graph, 'edge_attr') and graph.edge_attr is not None
+        if has_edge_attr:
+            print(f"✓ Using edge features: {graph.edge_attr.shape}")
+            edge_attr = graph.edge_attr.float()
+            
+            # For TransformerModel, pass edge_dim to constructor
+            if model_name == 'TransformerModel':
+                edge_dim = graph.edge_attr.size(1)
+                model = model_class(
+                    in_channels=graph.x.size(1),
+                    hidden_channels=self.model_config['hidden_channels'],
+                    out_channels=self.model_config['out_channels'],
+                    num_layers=self.model_config['num_layers'],
+                    dropout_rate=self.model_config['dropout_rate'],
+                    edge_dim=edge_dim
+                ).to(self.device)
+            else:
+                model = model_class(
+                    in_channels=graph.x.size(1),
+                    hidden_channels=self.model_config['hidden_channels'],
+                    out_channels=self.model_config['out_channels'],
+                    num_layers=self.model_config['num_layers'],
+                    dropout_rate=self.model_config['dropout_rate']
+                ).to(self.device)
+        else:
+            print("  Note: No edge features found")
+            edge_attr = None
+            # Initialise model
+            model = model_class(
+                in_channels=graph.x.size(1),
+                hidden_channels=self.model_config['hidden_channels'],
+                out_channels=self.model_config['out_channels'],
+                num_layers=self.model_config['num_layers'],
+                dropout_rate=self.model_config['dropout_rate']
+            ).to(self.device)
         
         # Use lower learning rate for SAGE model (more stable)
         lr = self.model_config['learning_rate']
@@ -213,6 +241,8 @@ class ModelTrainer:
         neg_edge_index = neg_edge_index.to(self.device)
         val_edge_tensor = val_edge_tensor.to(self.device)
         val_label_tensor = val_label_tensor.to(self.device)
+        if has_edge_attr:
+            edge_attr = edge_attr.to(self.device)
         
         # Training tracking - track both loss and primary metric
         best_val_loss = float('inf')
@@ -231,13 +261,22 @@ class ModelTrainer:
         
         print(f"Training for {self.model_config['num_epochs']} epochs with patience {self.model_config['patience']}")
         
-        for epoch in tqdm(range(self.model_config['num_epochs']), desc=f'Training {model_name}'):
+        # Use tqdm with explicit settings for better compatibility
+        import sys
+        for epoch in tqdm(range(self.model_config['num_epochs']), 
+                         desc=f'Training {model_name}',
+                         file=sys.stdout,
+                         ncols=80,
+                         mininterval=1.0):
             # Training phase
             model.train()
             optimizer.zero_grad()
             
-            # Forward pass
-            z = model(graph.x.float(), graph.edge_index)
+            # Forward pass with edge features if available
+            if has_edge_attr:
+                z = model(graph.x.float(), graph.edge_index, edge_attr=edge_attr)
+            else:
+                z = model(graph.x.float(), graph.edge_index)
             
             # Normalise embeddings to unit sphere (prevents saturation)
             z = F.normalize(z, p=2, dim=1)
@@ -269,7 +308,11 @@ class ModelTrainer:
             if epoch % 5 == 0:
                 model.eval()
                 with torch.no_grad():
-                    z = model(graph.x.float(), graph.edge_index)
+                    # Forward pass with edge features if available
+                    if has_edge_attr:
+                        z = model(graph.x.float(), graph.edge_index, edge_attr=edge_attr)
+                    else:
+                        z = model(graph.x.float(), graph.edge_index)
                     
                     # Normalise embeddings in validation too
                     z = F.normalize(z, p=2, dim=1)
@@ -287,7 +330,12 @@ class ModelTrainer:
                     )
                     
                     # Get the primary metric value
-                    current_metric = val_metrics.get(primary_metric, 0.0)
+                    # Handle recall@k specially by extracting from ranking metrics
+                    if primary_metric.startswith('recall@'):
+                        k_value = self.config.recall_k if hasattr(self.config, 'recall_k') else 100
+                        current_metric = val_metrics.get('ranking_metrics', {}).get(f'recall@{k_value}', 0.0)
+                    else:
+                        current_metric = val_metrics.get(primary_metric, 0.0)
                     
                     val_threshold = val_probs.mean().item()
                     
@@ -329,7 +377,11 @@ class ModelTrainer:
         
         # Final validation with comprehensive metrics
         with torch.no_grad():
-            z = model(graph.x.float(), graph.edge_index)
+            # Forward pass with edge features if available
+            if has_edge_attr:
+                z = model(graph.x.float(), graph.edge_index, edge_attr=edge_attr)
+            else:
+                z = model(graph.x.float(), graph.edge_index)
             
             # Normalise embeddings (must match training validation!)
             z = F.normalize(z, p=2, dim=1)
@@ -356,8 +408,9 @@ class ModelTrainer:
                 self.tracker.log_artifact(plot_path, f"training_plots/{model_name}")
             self.tracker.log_model(model, model_path)
             
-            # Log final metrics
-            self.tracker.log_metric(f"{model_name}_final_val_{primary_metric}", best_val_metric)
+            # Log final metrics (sanitise metric name for MLflow)
+            sanitised_metric = primary_metric.replace('@', '_')
+            self.tracker.log_metric(f"{model_name}_final_val_{sanitised_metric}", best_val_metric)
             self.tracker.log_metric(f"{model_name}_final_val_loss", best_val_loss)
             self.tracker.log_metric(f"{model_name}_best_threshold", best_threshold)
             self.tracker.log_metric(f"{model_name}_total_epochs", len(train_losses))
@@ -463,6 +516,33 @@ class ModelTrainer:
             ])
         
         print(f"Validation set: {val_edge_tensor.size(0)} samples")
+        
+        # DIAGNOSTIC: Print validation set composition
+        print("\n" + "="*60)
+        print("VALIDATION SET DIAGNOSTICS:")
+        print("="*60)
+        num_pos = (val_label_tensor == 1).sum().item()
+        num_neg = (val_label_tensor == 0).sum().item()
+        print(f"Positive samples: {num_pos}")
+        print(f"Negative samples: {num_neg}")
+        print(f"Pos:Neg ratio: 1:{num_neg/num_pos if num_pos > 0 else 0:.2f}")
+        print(f"Class balance: {num_pos/(num_pos + num_neg)*100:.1f}% positive")
+        
+        # Check if validation set is too small
+        if val_edge_tensor.size(0) < 1000:
+            print(f"\n  WARNING: Validation set is very small ({val_edge_tensor.size(0)} samples)")
+            print("   This may lead to unreliable metrics!")
+        
+        if num_neg < 100:
+            print(f"\n  WARNING: Very few negative samples ({num_neg})")
+            print("   Precision@K metrics will be inflated!")
+            print("   Recommendation: Increase negative samples in validation set")
+        
+        if num_pos < 100:
+            print(f"\n  WARNING: Fewer than 100 positive samples ({num_pos})")
+            print("   Recall@100 will be capped by number of positives!")
+        
+        print("="*60 + "\n")
         
         # Models to train - supports single model selection
         all_models = {
@@ -822,16 +902,28 @@ def main():
             print("\nTRAINING COMPLETED SUCCESSFULLY!")
             print("=" * 50)
             
-            # Print summary
+            # Print summary with ranking metrics
             for model_name, result in training_results.items():
-                print(f"{model_name}: {result['primary_metric'].upper()} = {result['validation_metric']:.4f}")
+                val_metrics = result.get('validation_metrics', {})
+                ranking_metrics = val_metrics.get('ranking_metrics', {})
+                
+                # Get recall@k and precision@k
+                k_value = config.recall_k if hasattr(config, 'recall_k') else 100
+                recall_at_k = ranking_metrics.get(f'recall@{k_value}', 0.0)
+                precision_at_k = ranking_metrics.get(f'precision@{k_value}', 0.0)
+                
+                print(f"{model_name}:")
+                print(f"  {result['primary_metric'].upper()} = {result['validation_metric']:.4f}")
+                print(f"  Recall@{k_value} = {recall_at_k:.4f}")
+                print(f"  Precision@{k_value} = {precision_at_k:.4f}")
             
             best_model = max(training_results.items(), key=lambda x: x[1]['validation_metric'])
             print(f"\nBest model: {best_model[0]} ({best_model[1]['primary_metric'].upper()} = {best_model[1]['validation_metric']:.4f})")
             
-            # Log best model info
+            # Log best model info (sanitise metric name for MLflow)
             tracker.log_param("best_model", best_model[0])
-            tracker.log_metric(f"best_model_{best_model[1]['primary_metric']}", best_model[1]['validation_metric'])
+            sanitised_metric = best_model[1]['primary_metric'].replace('@', '_')
+            tracker.log_metric(f"best_model_{sanitised_metric}", best_model[1]['validation_metric'])
             
             print(f"\nMLflow tracking URI: {tracker.experiment_name}")
             print(f"Run ID: {tracker.run_id}")

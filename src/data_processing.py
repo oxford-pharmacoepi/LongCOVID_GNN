@@ -273,6 +273,101 @@ class DataProcessor:
         
         return associations_table, score_column
     
+    def load_mechanism_of_action(self, path):
+        """
+        Load mechanismOfAction dataset for drug-gene edge features.
+        
+        Returns:
+            DataFrame with columns: [chemblIds, actionType, mechanismOfAction, targetName, targets]
+        """
+        print(f"Loading mechanismOfAction data from {path}")
+        
+        import glob
+        parquet_files = glob.glob(f"{path}/*.parquet")
+        
+        if not parquet_files:
+            print(f"Warning: No mechanismOfAction data found in {path}")
+            return pd.DataFrame()
+        
+        moa_dataset = ds.dataset(parquet_files, format="parquet")
+        moa_table = moa_dataset.to_table()
+        
+        # Select relevant columns
+        # chemblIds: drug ID, actionType: mechanism type (inhibitor, etc.), targets: gene IDs
+        moa_df = moa_table.to_pandas()
+        
+        print(f"Loaded {len(moa_df)} mechanism of action records")
+        return moa_df
+    
+    def load_drug_warnings(self, path):
+        """
+        Load drugWarnings dataset for enhanced drug node features.
+        
+        Returns:
+            DataFrame with drug warnings beyond black box warnings
+        """
+        print(f"Loading drugWarnings data from {path}")
+        
+        import glob
+        parquet_files = glob.glob(f"{path}/*.parquet")
+        
+        if not parquet_files:
+            print(f"Warning: No drugWarnings data found in {path}")
+            return pd.DataFrame()
+        
+        warnings_dataset = ds.dataset(parquet_files, format="parquet")
+        warnings_table = warnings_dataset.to_table()
+        warnings_df = warnings_table.to_pandas()
+        
+        print(f"Loaded {len(warnings_df)} drug warning records")
+        return warnings_df
+    
+    def load_interaction(self, path):
+        """
+        Load interaction dataset for drug-drug edges.
+        
+        Returns:
+            DataFrame with drug-drug interaction information
+        """
+        print(f"Loading interaction data from {path}")
+        
+        import glob
+        parquet_files = glob.glob(f"{path}/*.parquet")
+        
+        if not parquet_files:
+            print(f"Warning: No interaction data found in {path}")
+            return pd.DataFrame()
+        
+        interaction_dataset = ds.dataset(parquet_files, format="parquet")
+        interaction_table = interaction_dataset.to_table()
+        interaction_df = interaction_table.to_pandas()
+        
+        print(f"Loaded {len(interaction_df)} drug-drug interaction records")
+        return interaction_df
+    
+    def load_known_drugs_aggregated(self, path):
+        """
+        Load knownDrugsAggregated dataset for clinical trial phase information.
+        
+        Returns:
+            DataFrame with clinical trial phases and approval status
+        """
+        print(f"Loading knownDrugsAggregated data from {path}")
+        
+        import glob
+        parquet_files = glob.glob(f"{path}/*.parquet")
+        
+        if not parquet_files:
+            print(f"Warning: No knownDrugsAggregated data found in {path}")
+            return pd.DataFrame()
+        
+        kda_dataset = ds.dataset(parquet_files, format="parquet")
+        kda_table = kda_dataset.to_table()
+        kda_df = kda_table.to_pandas()
+        
+        print(f"Loaded {len(kda_df)} known drug records with clinical phase info")
+        return kda_df
+    
     def apply_id_mappings(self, molecule_df, indication_df):
         """Apply redundant ID mappings to clean the data."""
         print("Applying ID mappings for data consistency...")
@@ -366,7 +461,14 @@ class DataProcessor:
         approved_drugs_list = list(molecule_df['id'].unique())
         drug_type_list = list(molecule_df['drugType'].dropna().unique())
         gene_list = list(gene_table.column('id').unique().to_pylist())
-        disease_list = list(disease_df['id'].unique())
+        
+        if isinstance(disease_df, pd.DataFrame):
+            disease_list = list(disease_df['id'].unique())
+        else:
+            disease_list = disease_df.column('id').to_pylist()
+        
+        print(f"Diseases (core set with approved drugs): {len(disease_list)}")
+        print("Note: Ancestor diseases will be used for similarity edges but NOT added as nodes")
         
         # Extract reactome pathways
         if version == 21.04 or version == 21.06:
@@ -584,7 +686,7 @@ def detect_data_mode(config, force_mode=None):
         else:
             raise ValueError(f"Invalid force_mode: {force_mode}. Must be 'raw' or 'processed'")
     
-    # Default auto-detection logic (prioritize raw data for temporal validation)
+    # Default auto-detection logic (prioritise raw data for temporal validation)
     processed_path = config.paths['processed']
     
     # Check if pre-processed data exists
@@ -603,7 +705,7 @@ def detect_data_mode(config, force_mode=None):
         os.path.exists(config.paths['associations'])
     )
     
-    # Prioritize raw data when both exist (for temporal validation)
+    # Prioritise raw data when both exist (for temporal validation)
     if raw_files_exist:
         print("Raw OpenTargets data detected - using Option 1 workflow")
         return "raw"
@@ -621,7 +723,7 @@ def create_full_dataset(config):
     """Main function to create complete processed dataset."""
     print("Creating full processed dataset...")
     
-    # Initialize processor
+    # Initialise processor
     processor = DataProcessor(config)
     
     # Load raw data

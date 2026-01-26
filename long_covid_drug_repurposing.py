@@ -406,7 +406,7 @@ class LongCOVIDDrugRepurposing:
         return exists
     
     def add_long_covid_to_graph(self, gwas_genes: List[str]):
-        """Add Long COVID node to the graph with proper edges"""
+        """Add Long COVID node to the graph with proper edges and edge features"""
         print(f"\nAdding Long COVID to graph...")
         
         # Step 1: Add Long COVID to mappings
@@ -470,16 +470,33 @@ class LongCOVIDDrugRepurposing:
         else:
             print(f"  WARNING: Therapeutic area {infectious_disease_ta} not found")
         
-        # Step 5: Add all new edges to graph
+        # Step 5: Add all new edges to graph (with edge features if needed)
         if new_edges:
             new_edge_tensor = torch.tensor(new_edges, dtype=torch.long).t()
             self.graph.edge_index = torch.cat([self.graph.edge_index, new_edge_tensor.to(self.device)], dim=1)
+            
+            # If graph has edge features, generate features for new edges
+            if hasattr(self.graph, 'edge_attr') and self.graph.edge_attr is not None:
+                num_new_edges = len(new_edges)
+                edge_dim = self.graph.edge_attr.size(1)
+                
+                # Generate edge features as average of existing edge features
+                # This ensures new edges have similar characteristics to existing edges
+                avg_edge_features = self.graph.edge_attr.mean(dim=0, keepdim=True)
+                new_edge_features = avg_edge_features.repeat(num_new_edges, 1)
+                
+                # Concatenate new edge features to existing ones
+                self.graph.edge_attr = torch.cat([self.graph.edge_attr, new_edge_features.to(self.device)], dim=0)
+                
+                print(f"  Generated edge features for {num_new_edges} new edges (dim={edge_dim})")
             
             print(f"\nLong COVID added to graph:")
             print(f"   Node index: {self.long_covid_idx}")
             print(f"   Total nodes: {self.graph.x.shape[0]:,} (was {self.original_num_nodes:,})")
             print(f"   Total edges: {self.graph.edge_index.shape[1]:,} (was {self.original_num_edges:,})")
             print(f"   New edges: {self.graph.edge_index.shape[1] - self.original_num_edges:,}")
+            if hasattr(self.graph, 'edge_attr') and self.graph.edge_attr is not None:
+                print(f"   Total edge features: {self.graph.edge_attr.shape[0]:,}")
     
     def load_model(self):
         """Load the trained GNN model"""
@@ -508,14 +525,42 @@ class LongCOVIDDrugRepurposing:
         config = get_config()
         model_config = config.get_model_config()
         
-        # Initialise model
-        self.model = model_class(
-            in_channels=self.graph.x.shape[1],
-            hidden_channels=model_config['hidden_channels'],
-            out_channels=model_config['out_channels'],
-            num_layers=model_config['num_layers'],
-            dropout_rate=model_config['dropout_rate']
-        ).to(self.device)
+        # Check if graph has edge features and initialise model accordingly
+        has_edge_attr = hasattr(self.graph, 'edge_attr') and self.graph.edge_attr is not None
+        if has_edge_attr:
+            print(f"  ✓ Graph has edge features: {self.graph.edge_attr.shape}")
+            edge_dim = self.graph.edge_attr.size(1)
+            
+            # For TransformerModel, pass edge_dim to constructor
+            if model_name == 'Transformer':
+                self.model = model_class(
+                    in_channels=self.graph.x.shape[1],
+                    hidden_channels=model_config['hidden_channels'],
+                    out_channels=model_config['out_channels'],
+                    num_layers=model_config['num_layers'],
+                    dropout_rate=model_config['dropout_rate'],
+                    edge_dim=edge_dim
+                ).to(self.device)
+            else:
+                # For other models, pass edge_dim if they support it
+                self.model = model_class(
+                    in_channels=self.graph.x.shape[1],
+                    hidden_channels=model_config['hidden_channels'],
+                    out_channels=model_config['out_channels'],
+                    num_layers=model_config['num_layers'],
+                    dropout_rate=model_config['dropout_rate'],
+                    edge_dim=edge_dim
+                ).to(self.device)
+        else:
+            print("  Note: No edge features found")
+            # Initialise model without edge_dim
+            self.model = model_class(
+                in_channels=self.graph.x.shape[1],
+                hidden_channels=model_config['hidden_channels'],
+                out_channels=model_config['out_channels'],
+                num_layers=model_config['num_layers'],
+                dropout_rate=model_config['dropout_rate']
+            ).to(self.device)
         
         # Load weights
         checkpoint = torch.load(self.model_path, map_location=self.device, weights_only=False)
@@ -548,7 +593,11 @@ class LongCOVIDDrugRepurposing:
         
         with torch.no_grad():
             # Get node embeddings from model
-            embeddings = self.model(self.graph.x, self.graph.edge_index)
+            # Pass edge features if they exist in the graph
+            if hasattr(self.graph, 'edge_attr') and self.graph.edge_attr is not None:
+                embeddings = self.model(self.graph.x, self.graph.edge_index, edge_attr=self.graph.edge_attr)
+            else:
+                embeddings = self.model(self.graph.x, self.graph.edge_index)
             
             # Normalise embeddings (consistent with training/testing)
             embeddings = F.normalize(embeddings, p=2, dim=1)

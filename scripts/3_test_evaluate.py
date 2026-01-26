@@ -248,14 +248,43 @@ class ModelEvaluator:
         # Get model configuration from config
         model_config = config.get_model_config()
         
-        # Load model with config parameters
-        model = model_class(
-            in_channels=graph.x.size(1),
-            hidden_channels=model_config['hidden_channels'],
-            out_channels=model_config['out_channels'],
-            num_layers=model_config['num_layers'],
-            dropout_rate=model_config['dropout_rate']
-        ).to(self.device)
+        # Check if graph has edge features
+        has_edge_attr = hasattr(graph, 'edge_attr') and graph.edge_attr is not None
+        if has_edge_attr:
+            print(f"✓ Using edge features: {graph.edge_attr.shape}")
+            edge_attr = graph.edge_attr.float()
+            
+            # For TransformerModel, pass edge_dim to constructor
+            model_name = model_class.__name__
+            if model_name == 'TransformerModel':
+                edge_dim = graph.edge_attr.size(1)
+                model = model_class(
+                    in_channels=graph.x.size(1),
+                    hidden_channels=model_config['hidden_channels'],
+                    out_channels=model_config['out_channels'],
+                    num_layers=model_config['num_layers'],
+                    dropout_rate=model_config['dropout_rate'],
+                    edge_dim=edge_dim
+                ).to(self.device)
+            else:
+                model = model_class(
+                    in_channels=graph.x.size(1),
+                    hidden_channels=model_config['hidden_channels'],
+                    out_channels=model_config['out_channels'],
+                    num_layers=model_config['num_layers'],
+                    dropout_rate=model_config['dropout_rate']
+                ).to(self.device)
+        else:
+            print("  Note: No edge features found")
+            edge_attr = None
+            # Load model with config parameters
+            model = model_class(
+                in_channels=graph.x.size(1),
+                hidden_channels=model_config['hidden_channels'],
+                out_channels=model_config['out_channels'],
+                num_layers=model_config['num_layers'],
+                dropout_rate=model_config['dropout_rate']
+            ).to(self.device)
         
         model.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=False))
         model.eval()
@@ -264,13 +293,19 @@ class ModelEvaluator:
         graph = graph.to(self.device)
         test_edge_tensor = test_edge_tensor.to(self.device)
         test_label_tensor = test_label_tensor.to(self.device)
+        if has_edge_attr:
+            edge_attr = edge_attr.to(self.device)
         
         # Make predictions in batches to avoid memory issues
         batch_size = model_config['batch_size']
         test_probs = []
         
         with torch.no_grad():
-            z = model(graph.x.float(), graph.edge_index)
+            # Forward pass with edge features if available
+            if has_edge_attr:
+                z = model(graph.x.float(), graph.edge_index, edge_attr=edge_attr)
+            else:
+                z = model(graph.x.float(), graph.edge_index)
             
             # Normalise embeddings during testing
             z = F.normalize(z, p=2, dim=1)
@@ -390,6 +425,16 @@ class ModelEvaluator:
                 
                 print(f"Accuracy: {metrics['accuracy']:.4f}")
                 
+                print(f"Precision: {metrics['precision']:.4f}")
+                if 'precision' in ci_results:
+                    ci = ci_results['precision']
+                    print(f"          (95% CI: [{ci['ci_lower']:.4f}, {ci['ci_upper']:.4f}])")
+                
+                print(f"Recall: {metrics['recall']:.4f}")
+                if 'recall' in ci_results:
+                    ci = ci_results['recall']
+                    print(f"       (95% CI: [{ci['ci_lower']:.4f}, {ci['ci_upper']:.4f}])")
+                
                 # End MLflow run for this model
                 if self.mlflow_tracker:
                     self.mlflow_tracker.end_run()
@@ -419,15 +464,44 @@ class ModelEvaluator:
         model_path = model_info['model_path']
         model_class = model_info['model_class']
         
-        # Load model
-        model_config = config.get_model_config()
-        model = model_class(
-            in_channels=graph.x.size(1),
-            hidden_channels=model_config['hidden_channels'],
-            out_channels=model_config['out_channels'],
-            num_layers=model_config['num_layers'],
-            dropout_rate=model_config['dropout_rate']
-        ).to(self.device)
+        # Check if graph has edge features
+        has_edge_attr = hasattr(graph, 'edge_attr') and graph.edge_attr is not None
+        if has_edge_attr:
+            edge_attr = graph.edge_attr.float()
+            
+            # For TransformerModel, pass edge_dim to constructor
+            model_name = model_class.__name__
+            if model_name == 'TransformerModel':
+                edge_dim = graph.edge_attr.size(1)
+                model_config = config.get_model_config()
+                model = model_class(
+                    in_channels=graph.x.size(1),
+                    hidden_channels=model_config['hidden_channels'],
+                    out_channels=model_config['out_channels'],
+                    num_layers=model_config['num_layers'],
+                    dropout_rate=model_config['dropout_rate'],
+                    edge_dim=edge_dim
+                ).to(self.device)
+            else:
+                model_config = config.get_model_config()
+                model = model_class(
+                    in_channels=graph.x.size(1),
+                    hidden_channels=model_config['hidden_channels'],
+                    out_channels=model_config['out_channels'],
+                    num_layers=model_config['num_layers'],
+                    dropout_rate=model_config['dropout_rate']
+                ).to(self.device)
+        else:
+            edge_attr = None
+            # Load model
+            model_config = config.get_model_config()
+            model = model_class(
+                in_channels=graph.x.size(1),
+                hidden_channels=model_config['hidden_channels'],
+                out_channels=model_config['out_channels'],
+                num_layers=model_config['num_layers'],
+                dropout_rate=model_config['dropout_rate']
+            ).to(self.device)
         
         model.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=False))
         model.eval()
@@ -449,7 +523,7 @@ class ModelEvaluator:
         # Sample diseases with at least 5 positive drugs
         eligible_diseases = [d for d, drugs in disease_to_drugs.items() if len(drugs) >= 5]
         if len(eligible_diseases) == 0:
-            print("⚠️  No diseases with ≥5 positive drugs in test set")
+            print("  No diseases with ≥5 positive drugs in test set")
             return None
         
         config = get_config()
@@ -459,7 +533,11 @@ class ModelEvaluator:
         # Evaluate recall@K for each disease
         with torch.no_grad():
             graph = graph.to(self.device)
-            z = model(graph.x.float(), graph.edge_index)
+            if has_edge_attr:
+                edge_attr = edge_attr.to(self.device)
+                z = model(graph.x.float(), graph.edge_index, edge_attr=edge_attr)
+            else:
+                z = model(graph.x.float(), graph.edge_index)
             
             num_drugs = 2000  # Approximate number of drugs
             drug_embeddings = z[:num_drugs]
@@ -664,7 +742,8 @@ class ModelEvaluator:
         print(f"FP predictions saved as CSV: {csv_path}")
         
         # 2. PyTorch tensor format (backup format)
-        tensor_data = [[row['drug_name'], row['disease_name'], row['confident_score']] 
+        tensor_data = [[row['drug_name'], row['disease_name'], row['confident_score'], 
+                        row['drug_idx'], row['disease_idx']] 
                        for _, row in fp_df.iterrows()]
         pt_filename = f"{model_name}_FP_predictions_{timestamp}.pt"
         pt_path = os.path.join(self.results_dirs['predictions'], pt_filename)
