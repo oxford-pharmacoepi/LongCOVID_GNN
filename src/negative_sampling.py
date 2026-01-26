@@ -578,6 +578,7 @@ class MixedNegativeSampler(NegativeSampler):
                 'hard': 0.5,           # Moderate hard negatives
                 'degree_matched': 0.3, # Structural similarity control
                 'random': 0.2          # Random for diversity
+            }
         
         self.strategy_weights = strategy_weights
         self.adaptive = adaptive

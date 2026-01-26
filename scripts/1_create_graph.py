@@ -847,6 +847,23 @@ class GraphBuilder:
             "Disease-Gene": int(self.disease_gene_edges.size(1))
         }
         
+        # Add custom edges to metadata if they exist
+        if hasattr(self, 'custom_edge_tensor') and self.custom_edge_tensor.size(1) > 0:
+            # Count custom edges by type based on network config
+            num_custom_edges = int(self.custom_edge_tensor.size(1))
+            
+            if self.config.network_config.get('disease_similarity_network', False):
+                edge_info["Disease-Disease"] = num_custom_edges
+                print(f"  Added Disease-Disease edges to metadata: {num_custom_edges}")
+            
+            if self.config.network_config.get('molecule_similarity_network', False):
+                edge_info["Drug-Drug"] = num_custom_edges
+                print(f"  Added Drug-Drug edges to metadata: {num_custom_edges}")
+            
+            if self.config.network_config.get('trial_edges', False):
+                edge_info["Trial-Edges"] = num_custom_edges
+                print(f"  Added Trial edges to metadata: {num_custom_edges}")
+        
         metadata = {
             "node_info": node_info,
             "edge_info": edge_info,

@@ -30,6 +30,7 @@ class Config:
                 'hard': 0.4,          
                 'degree_matched': 0.4,  
                 'random': 0.2            
+            }
         }
         
         # Loss function configuration
@@ -42,12 +43,13 @@ class Config:
             'prior': 0.01,                   # For PU learning (1% of negatives might be hidden positives)
             'min_neg_weight': 0.1,           # For confidence-weighted loss
             'max_neg_weight': 1.0,           # For confidence-weighted loss
-            'margin': 0.5,                   # For ranking loss - margin between pos and neg
-            'ranking_weight': 0.3            # Weight for ranking component (0.3 = 30% ranking, 70% BCE)
+            'margin': 1.0,                   # For ranking loss 
+            'ranking_weight': 0.5,            
+            'variance_weight': 0.2           
         }
         
         # Evaluation settings
-        self.primary_metric = 'apr'  # Changed from 'recall@k' to 'apr' - better for ranking with imbalanced data
+        self.primary_metric = 'apr'  # "auc", "apr", "f1", "accuracy", "recall@k", "precision@k"
         self.recall_k = 100  # K value for Recall@K (used when primary_metric is "recall@k")
         self.ranking_k_values = [10, 50, 100, 200, 500]  # K values to compute for all ranking metrics
         
@@ -80,7 +82,7 @@ class Config:
         self.network_config = {
             'disease_similarity_network': False,  # Enable disease-disease edges
             'molecule_similarity_network': False,  # Enable molecule-molecule edges (K: still not fully tested)
-            'reactome_network': True,
+            'reactome_network': False,
             'trial_edges': False
         }
         

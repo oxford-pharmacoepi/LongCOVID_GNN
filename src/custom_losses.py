@@ -457,8 +457,11 @@ class RankingAwareBCELoss(nn.Module):
             pos_var = pos_scores.var() if pos_scores.numel() > 1 else torch.tensor(0.0, device=logits.device)
             neg_var = neg_scores.var() if neg_scores.numel() > 1 else torch.tensor(0.0, device=logits.device)
             
-            # Negative variance loss to encourage higher variance
-            variance_loss = -torch.log(pos_var + 1e-6) - torch.log(neg_var + 1e-6)
+            # Use negative of variance directly (bounded and stable)
+            # Higher variance = lower loss
+            # Clamp to prevent over-spreading
+            target_var = 0.1  # Target variance
+            variance_loss = F.relu(target_var - pos_var) + F.relu(target_var - neg_var)
         else:
             ranking_loss = torch.tensor(0.0, device=logits.device)
             variance_loss = torch.tensor(0.0, device=logits.device)

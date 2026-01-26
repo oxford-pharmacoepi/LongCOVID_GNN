@@ -777,7 +777,7 @@ def custom_edges(disease_similarity_network, trial_edges, molecule_similarity_ne
             similarity_edges = create_disease_similarity_edges_from_ancestors(
                 filtered_disease_table, 
                 disease_key_mapping, 
-                min_shared_ancestors=2  # Require at least 2 shared ancestors
+                min_shared_ancestors=1  
             )
             custom_edges.extend(similarity_edges)
             
