@@ -1,0 +1,8 @@
+drug_id drug_name
+CHEMBL4802135 nirmatrelvir
+CHEMBL163 ritonavir
+CHEMBL902 famotidine
+CHEMBL998 loratadine
+CHEMBL2105759 baricitinib
+CHEMBL1431 metformin
+CHEMBL19019 naltrexone
