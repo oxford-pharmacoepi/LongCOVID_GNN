@@ -66,10 +66,17 @@ class GraphBuilder:
         self.molecule_df = pd.read_csv(f"{processed_dir}processed_molecules.csv")
         self.indication_df = pd.read_csv(f"{processed_dir}processed_indications.csv")
         self.disease_df = pd.read_csv(f"{processed_dir}processed_diseases.csv")
+        self.known_drugs_df = pd.read_csv(f"{processed_dir}processed_known_drugs.csv") if os.path.exists(f"{processed_dir}processed_known_drugs.csv") else pd.DataFrame()
         
         # Handle list columns in indication_df
         if 'approvedIndications' in self.indication_df.columns:
             self.indication_df['approvedIndications'] = self.indication_df['approvedIndications'].apply(
+                lambda x: eval(x) if isinstance(x, str) and x.startswith('[') else x
+            )
+        
+        # Handle list columns in molecule_df
+        if 'linkedDiseases.rows' in self.molecule_df.columns:
+            self.molecule_df['linkedDiseases.rows'] = self.molecule_df['linkedDiseases.rows'].apply(
                 lambda x: eval(x) if isinstance(x, str) and x.startswith('[') else x
             )
         
@@ -129,7 +136,9 @@ class GraphBuilder:
         associations_table, score_column = self.processor.load_associations_data(
             self.config.paths['associations'], self.config.training_version
         )
-        
+        # Load other drug-disease datasets
+        self.known_drugs_df = self.processor.load_known_drugs_aggregated(self.config.paths['knownDrugsAggregated']) if 'knownDrugsAggregated' in self.config.paths else None
+
         # Convert to dataframes for processing
         indication_df = indication_table.to_pandas()
         molecule_df = molecule_table.to_pandas()
@@ -137,7 +146,7 @@ class GraphBuilder:
         
         # Apply ID mappings and filtering
         self.molecule_df, self.indication_df = self.processor.apply_id_mappings(molecule_df, indication_df)
-        self.molecule_df = self.processor.filter_linked_molecules(self.molecule_df, self.indication_df)
+        self.molecule_df = self.processor.filter_linked_molecules(self.molecule_df, self.indication_df, self.known_drugs_df)
         self.disease_df = disease_df
         
         # Create node mappings
@@ -151,7 +160,8 @@ class GraphBuilder:
             'processed_indications': self.indication_df,
             'processed_diseases': self.disease_df,
             'processed_genes': gene_table.to_pandas(),
-            'processed_associations': associations_table.to_pandas()
+            'processed_associations': associations_table.to_pandas(),
+            'processed_known_drugs': self.known_drugs_df if isinstance(self.known_drugs_df, pd.DataFrame) else pd.DataFrame()
         }
         
         self.processor.save_processed_data(processed_data, f"{self.config.paths['processed']}tables/")
@@ -459,12 +469,34 @@ class GraphBuilder:
                 self.mappings['drug_type_key_mapping']
             )
             
-            molecule_disease_table = indication_table.select(['id', 'approvedIndications']).flatten()
-            self.molecule_disease_edges = extract_edges(
-                molecule_disease_table,
-                self.mappings['drug_key_mapping'],
-                self.mappings['disease_key_mapping']
-            )
+            # Extract molecule-disease edges from multiple sources for completeness
+            print("Extracting drug-disease edges from multiple sources...")
+            
+            # 1. Approved Indications
+            ind_table = indication_table.select(['id', 'approvedIndications']).flatten()
+            ind_edges = extract_edges(ind_table, self.mappings['drug_key_mapping'], self.mappings['disease_key_mapping'], return_edge_set=True)
+            print(f"  - Edges from indications: {len(ind_edges)}")
+            
+            # 2. Known Drugs (Clinical Trials Phase 3 and 4)
+            known_edges = set()
+            if hasattr(self, 'known_drugs_df') and self.known_drugs_df is not None and not self.known_drugs_df.empty:
+                valid_known = self.known_drugs_df[self.known_drugs_df['phase'] >= 3]
+                # Convert to table for extract_edges
+                valid_known_table = pa.Table.from_pandas(valid_known[['drugId', 'diseaseId']])
+                known_edges = extract_edges(valid_known_table, self.mappings['drug_key_mapping'], self.mappings['disease_key_mapping'], return_edge_set=True)
+                print(f"  - Edges from clinical trials (Ph 3/4): {len(known_edges)}")
+            
+            # 3. Pre-linked diseases from molecule metadata
+            meta_edges = set()
+            if 'linkedDiseases.rows' in self.molecule_df.columns:
+                meta_table = pa.Table.from_pandas(self.molecule_df[['id', 'linkedDiseases.rows']])
+                meta_edges = extract_edges(meta_table, self.mappings['drug_key_mapping'], self.mappings['disease_key_mapping'], return_edge_set=True)
+                print(f"  - Edges from molecule metadata: {len(meta_edges)}")
+            
+            # Merge all edges
+            all_md_edges = ind_edges | known_edges | meta_edges
+            self.molecule_disease_edges = torch.tensor(list(all_md_edges), dtype=torch.long).t().contiguous()
+            print(f"  Total unique drug-disease edges: {self.molecule_disease_edges.shape[1]}")
             
             molecule_gene_table = molecule_table.select(['id', 'linkedTargets.rows']).drop_null().flatten()
             self.molecule_gene_edges = extract_edges(

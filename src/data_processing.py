@@ -396,19 +396,44 @@ class DataProcessor:
         
         return molecule_df, indication_df
     
-    def filter_linked_molecules(self, molecule_df, indication_df):
-        """Filter molecules to only include those with approved indications."""
-        print("Filtering molecules with approved indications...")
+    def filter_linked_molecules(self, molecule_df, indication_df, known_drugs_df=None):
+        """Filter molecules to only include those with validated connections."""
+        print("Filtering molecules with validated connections...")
         
         # Remove molecules with parent IDs (keep only parent molecules)
         molecule_df = molecule_df[pd.isna(molecule_df['parentId'])]
         
-        # Filter for molecules that have approved indications
-        unique_chembl_ids = indication_df['id'].unique()
-        molecule_df = molecule_df[molecule_df['id'].isin(unique_chembl_ids)]
+        # 1. Molecules from approved indications
+        unique_indication_ids = set(indication_df['id'].unique())
         
-        print(f"Filtered to {len(molecule_df)} molecules with approved indications")
-        return molecule_df
+        # 2. Molecules from known drugs (Phase 3 or 4)
+        unique_known_ids = set()
+        if known_drugs_df is not None:
+            # Filter for Phase 3 and 4
+            valid_known = known_drugs_df[known_drugs_df['phase'] >= 3]
+            unique_known_ids = set(valid_known['drugId'].unique())
+        
+        # 3. Molecules with pre-linked diseases in metadata
+        def has_linked_diseases(row):
+            if 'linkedDiseases' in row and isinstance(row['linkedDiseases'], dict):
+                return row['linkedDiseases'].get('count', 0) > 0
+            return False
+            
+        unique_metadata_ids = set(molecule_df[molecule_df.apply(has_linked_diseases, axis=1)]['id'].unique())
+        
+        # Combine all valid IDs
+        all_valid_ids = unique_indication_ids | unique_known_ids | unique_metadata_ids
+        
+        print(f"  Molecules in Indications: {len(unique_indication_ids)}")
+        print(f"  Molecules in Known Drugs (Ph 3+): {len(unique_known_ids)}")
+        print(f"  Molecules with Metadata Links: {len(unique_metadata_ids)}")
+        print(f"  Total Unique Valid Molecules: {len(all_valid_ids)}")
+        
+        # Filter molecule_df
+        filtered_molecule_df = molecule_df[molecule_df['id'].isin(all_valid_ids)]
+        
+        print(f"Filtered to {len(filtered_molecule_df)} molecules with validated connections")
+        return filtered_molecule_df
     
     def create_gene_reactome_mapping(self, gene_table, version):
         """Create gene-reactome pathway mappings based on version."""
@@ -740,11 +765,14 @@ def create_full_dataset(config):
     molecule_df = molecule_table.to_pandas()
     disease_df = disease_table.to_pandas()
     
+    # Load other drug-disease datasets
+    known_drugs_df = processor.load_known_drugs_aggregated(config.paths['knownDrugsAggregated']) if 'knownDrugsAggregated' in config.paths else None
+
     # Apply ID mappings
     molecule_df, indication_df = processor.apply_id_mappings(molecule_df, indication_df)
     
-    # Filter molecules
-    molecule_df = processor.filter_linked_molecules(molecule_df, indication_df)
+    # Filter molecules (now more inclusive)
+    molecule_df = processor.filter_linked_molecules(molecule_df, indication_df, known_drugs_df)
     
     # Create node mappings
     mappings = processor.create_node_mappings(
@@ -757,7 +785,8 @@ def create_full_dataset(config):
         'processed_indications': indication_df,
         'processed_diseases': disease_df,
         'processed_genes': gene_table.to_pandas(),
-        'processed_associations': associations_table.to_pandas()
+        'processed_associations': associations_table.to_pandas(),
+        'processed_known_drugs': known_drugs_df if known_drugs_df is not None else pd.DataFrame()
     }
     
     processor.save_processed_data(processed_data, f"{config.paths['processed']}tables/")
