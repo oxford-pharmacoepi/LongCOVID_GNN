@@ -956,7 +956,8 @@ Note: Drug name lookup uses ChEMBL API and can be slow for many drugs.
     )
     
     # File paths
-    parser.add_argument('--graph', type=str, help='Path to graph file (.pt)')
+    parser.add_argument('--graph', type=str, default=None,
+                       help='Path to graph file (.pt) - loads latest graph by default')
     parser.add_argument('--model', type=str, help='Path to trained model (.pt)')
     parser.add_argument('--data-path', type=str, default='processed_data',
                        help='Path to processed data directory')

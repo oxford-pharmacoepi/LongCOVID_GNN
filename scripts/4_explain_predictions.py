@@ -897,7 +897,8 @@ def create_node_type_mapping(graph):
 def main():
     """Main function."""
     parser = argparse.ArgumentParser(description='GNN Explainer for drug-disease predictions')
-    parser.add_argument('--graph', type=str, help='Path to graph file (.pt)')
+    parser.add_argument('--graph', type=str, default=None,
+                       help='Path to graph file (.pt) - loads latest graph by default')
     parser.add_argument('--model', type=str, help='Path to trained model (.pt)')
     parser.add_argument('--predictions', type=str, help='Path to FP predictions (CSV or PT)')
     parser.add_argument('--output-dir', type=str, default='results/explainer/', help='Output directory')

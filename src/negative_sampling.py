@@ -103,7 +103,7 @@ class NegativeSampler:
     All sampling strategies should inherit from this class.
     """
     
-    def __init__(self, seed: int = 42, future_positives: Optional[Set[Tuple[int, int]]] = None):
+    def __init__(self, seed: int = 42, future_positives: Optional[Set[Tuple[int, int]]] = None, **kwargs):
         """
         Initialise sampler.
         
@@ -111,6 +111,7 @@ class NegativeSampler:
             seed: Random seed for reproducibility
             future_positives: Set of edges that are positive in validation/test sets
                              (to prevent temporal leakage)
+            **kwargs: Additional arguments ignored by this sampler
         """
         self.seed = seed
         self.future_positives = future_positives or set()
@@ -200,7 +201,8 @@ class HardNegativeSampler(NegativeSampler):
                  fallback_to_random: bool = True, 
                  future_positives: Optional[Set[Tuple[int, int]]] = None,
                  max_cn_threshold: Optional[int] = None,
-                 min_cn_threshold: int = 1):
+                 min_cn_threshold: int = 1,
+                 **kwargs):
         """
         Initialise hard negative sampler.
         
@@ -212,7 +214,7 @@ class HardNegativeSampler(NegativeSampler):
                              If None, no upper limit. Recommended: 5-10 for drug-disease networks
             min_cn_threshold: Minimum common neighbors to consider as "hard" (default: 1)
         """
-        super().__init__(seed, future_positives)
+        super().__init__(seed, future_positives, **kwargs)
         self.fallback_to_random = fallback_to_random
         self.max_cn_threshold = max_cn_threshold
         self.min_cn_threshold = min_cn_threshold
@@ -371,7 +373,7 @@ class DegreeMatchedNegativeSampler(NegativeSampler):
     to those in positive samples.
     """
     
-    def __init__(self, degree_tolerance: float = 0.3, seed: int = 42, future_positives: Optional[Set[Tuple[int, int]]] = None):
+    def __init__(self, degree_tolerance: float = 0.3, seed: int = 42, future_positives: Optional[Set[Tuple[int, int]]] = None, **kwargs):
         """
         Initialise degree-matched sampler.
         
@@ -380,7 +382,7 @@ class DegreeMatchedNegativeSampler(NegativeSampler):
             seed: Random seed
             future_positives: Set of future positive edges to exclude
         """
-        super().__init__(seed, future_positives)
+        super().__init__(seed, future_positives, **kwargs)
         self.degree_tolerance = degree_tolerance
     
     def sample(self, 
@@ -459,7 +461,7 @@ class FeatureSimilarityNegativeSampler(NegativeSampler):
     Samples negatives where nodes have similar features to positive pairs.
     """
     
-    def __init__(self, similarity_threshold: float = 0.5, seed: int = 42, future_positives: Optional[Set[Tuple[int, int]]] = None):
+    def __init__(self, similarity_threshold: float = 0.5, seed: int = 42, future_positives: Optional[Set[Tuple[int, int]]] = None, **kwargs):
         """
         Initialise feature-similarity sampler.
         
@@ -468,7 +470,7 @@ class FeatureSimilarityNegativeSampler(NegativeSampler):
             seed: Random seed
             future_positives: Set of future positive edges to exclude
         """
-        super().__init__(seed, future_positives)
+        super().__init__(seed, future_positives, **kwargs)
         self.similarity_threshold = similarity_threshold
     
     def sample(self, 
@@ -554,7 +556,8 @@ class MixedNegativeSampler(NegativeSampler):
                  future_positives: Optional[Set[Tuple[int, int]]] = None,
                  adaptive: bool = False,
                  max_cn_threshold: Optional[int] = None,
-                 min_cn_threshold: int = 1):
+                 min_cn_threshold: int = 1,
+                 **kwargs):
         """
         Initialise mixed sampler.
         
@@ -571,7 +574,7 @@ class MixedNegativeSampler(NegativeSampler):
                              Recommended: 5-10 for drug-disease networks
             min_cn_threshold: Minimum common neighbors for hard negatives
         """
-        super().__init__(seed, future_positives)
+        super().__init__(seed, future_positives, **kwargs)
         
         if strategy_weights is None:
             strategy_weights = {
