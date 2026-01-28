@@ -109,6 +109,10 @@ class IdMapper:
         # Handle lists and tuples
         elif isinstance(value, (list, tuple)):
             return list(value)
+            
+        # Handle numpy arrays
+        elif isinstance(value, np.ndarray):
+            return value.tolist()
         
         # Default
         else:

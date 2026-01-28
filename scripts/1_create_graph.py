@@ -474,7 +474,12 @@ class GraphBuilder:
             
             # 1. Approved Indications
             ind_table = indication_table.select(['id', 'approvedIndications']).flatten()
-            ind_edges = extract_edges(ind_table, self.mappings['drug_key_mapping'], self.mappings['disease_key_mapping'], return_edge_set=True)
+            print(f"DEBUG: indication_table rows: {len(ind_table)}")
+            if len(ind_table) > 0:
+                print(f"DEBUG: Sample indication IDs: {ind_table['id'].slice(0,5).to_pylist()}")
+                print(f"DEBUG: Sample approvedIndications: {ind_table['approvedIndications'].slice(0,5).to_pylist()}")
+            
+            ind_edges = extract_edges(ind_table, self.mappings['drug_key_mapping'], self.mappings['disease_key_mapping'], return_edge_set=True, debug=True)
             print(f"  - Edges from indications: {len(ind_edges)}")
             
             # 2. Known Drugs (Clinical Trials Phase 3 and 4)
