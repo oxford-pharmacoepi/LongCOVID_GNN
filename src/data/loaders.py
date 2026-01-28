@@ -100,7 +100,13 @@ class OpenTargetsLoader:
     def load_gene_data(self, path, version):
         """Load and preprocess gene/target data."""
         print(f"Loading gene data from {path}")
-        gene_table = ds.dataset(path, format='parquet').to_table()
+        
+        # Load dataset, excluding non-parquet files
+        gene_table = ds.dataset(
+            path, 
+            format='parquet',
+            exclude_invalid_files=True
+        ).to_table()
         
         # Version-specific column selection
         if version >= 22.04:
