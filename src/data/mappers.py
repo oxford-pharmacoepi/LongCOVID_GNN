@@ -6,6 +6,7 @@ Handles redundant ID resolution and node-to-index mappings for graph constructio
 import pandas as pd
 import pyarrow as pa
 import ast
+import numpy as np
 
 
 class IdMapper:
