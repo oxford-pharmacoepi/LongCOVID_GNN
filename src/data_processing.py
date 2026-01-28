@@ -132,37 +132,34 @@ class DataProcessor:
         """Create gene-reactome pathway mappings based on version."""
         print("Creating gene-reactome mappings...")
         
-        if version >= 22.04:
-            pathway_column = 'pathways'
+        if version == 21.04 or version == 21.06:
+            # Older versions use 'reactome' column which is a list of IDs
+            if 'reactome' in gene_table.column_names:
+                gene_reactome_table = gene_table.select(['id', 'reactome']).flatten()
+                return gene_reactome_table
+            else:
+                print("Warning: 'reactome' column not found for version 21.06")
+                return pa.table({'geneId': [], 'reactomeId': []})
         else:
-            pathway_column = 'pathways'
-        
-        if pathway_column not in gene_table.column_names:
-            print(f"Warning: {pathway_column} column not found in gene table")
-            return pa.table({'geneId': [], 'reactomeId': []})
-        
-        # Extract gene-pathway pairs
-        gene_ids = []
-        pathway_ids = []
-        
-        for i in range(len(gene_table)):
-            gene_id = gene_table['id'][i].as_py()
-            pathways = gene_table[pathway_column][i].as_py()
-            
-            if pathways:
-                if isinstance(pathways, str):
-                    import ast
-                    try:
-                        pathways = ast.literal_eval(pathways)
-                    except:
-                        continue
+            # Handle newer format with 'pathways' column containing dictionaries
+            if 'pathways' in gene_table.column_names:
+                gene_reactome_df = gene_table.select(['id', 'pathways']).flatten().to_pandas()
+                exploded = gene_reactome_df.explode('pathways')
                 
-                if isinstance(pathways, list):
-                    for pathway in pathways:
-                        gene_ids.append(gene_id)
-                        pathway_ids.append(pathway)
-        
-        return pa.table({'geneId': gene_ids, 'reactomeId': pathway_ids})
+                def extract_pathway_id(x):
+                    if pd.notnull(x):
+                        if isinstance(x, dict):
+                            return x.get('pathwayId')
+                        elif hasattr(x, 'get'): 
+                            return x['pathwayId']
+                    return None
+
+                exploded['pathwayId'] = exploded['pathways'].apply(extract_pathway_id)
+                final_df = exploded[['id', 'pathwayId']].dropna()
+                return pa.Table.from_pandas(final_df)
+            else:
+                print("Warning: 'pathways' column not found")
+                return pa.table({'id': [], 'pathwayId': []})
     
     def generate_validation_test_splits(self, config, mappings, train_edges_set):
         """Generate validation and test edge splits using different OpenTargets versions."""
