@@ -25,10 +25,9 @@ class OpenTargetsLoader:
         print(f"Loading indication data from {path}")
         indication_table = ds.dataset(path, format='parquet', exclude_invalid_files=True).to_table()
         
-        # Filter to only approved indications
-        indication_table = indication_table.filter(
-            pc.field('maxPhaseForIndication') == 4
-        )
+        # Filter for drugs with approved indications
+        expr = pc.list_value_length(pc.field("approvedIndications")) > 0
+        indication_table = indication_table.filter(expr)
         
         return indication_table
     
