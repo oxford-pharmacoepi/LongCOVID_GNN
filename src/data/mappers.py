@@ -171,8 +171,14 @@ class NodeIndexMapper:
         
         # Create reactome pathway list from gene data
         reactome_list = []
+        pathways_column = None
+        
         if 'pathways' in gene_table.column_names:
             pathways_column = gene_table.column('pathways').to_pylist()
+        elif 'reactome' in gene_table.column_names:
+            pathways_column = gene_table.column('reactome').to_pylist()
+            
+        if pathways_column:
             for pathways in pathways_column:
                 if pathways:
                     if isinstance(pathways, str):
