@@ -16,9 +16,9 @@ class OpenTargetsLoader:
     Single Responsibility: Load raw data files and apply basic preprocessing.
     """
     
-    def __init__(self):
+    def __init__(self, config=None):
         """Initialize the loader."""
-        pass
+        self.config = config
     
     def load_indication_data(self, path):
         """Load and preprocess indication data."""
