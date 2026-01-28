@@ -109,8 +109,19 @@ class DataProcessor:
         """Apply redundant ID mappings to clean the data."""
         print("Applying ID mappings for data consistency...")
         
-        # Apply drug mappings
-        molecule_df = self.id_mapper.apply_drug_mappings(molecule_df)
+        # EXACT COPY from original: only apply drug mappings to indication_df, NOT molecule_df
+        # Apply drug ID mappings to indication_df only
+        drug_mappings = self.id_mapper.redundant_id_mapping['drug_mappings']
+        id_to_parentid_mapping = {
+            k: self.id_mapper.resolve_mapping(v, drug_mappings) 
+            for k, v in drug_mappings.items()
+        }
+        
+        # Update drug IDs in indication_df only
+        indication_df['id'] = indication_df['id'].apply(
+            lambda x: self.id_mapper.resolve_mapping(x, id_to_parentid_mapping) 
+            if x in id_to_parentid_mapping else x
+        )
         
         # Apply disease mappings to indications
         indication_df = self.id_mapper.apply_disease_mappings(indication_df)
