@@ -21,49 +21,47 @@ class MoleculeFilter:
     def filter_linked_molecules(self, molecule_df, indication_df, known_drugs_df=None):
         """Filter molecules to only include those with validated connections."""
         print("Filtering molecules with validated connections...")
-        # First, remove molecules with parent IDs (keep only parent molecules)
-        if "parentId" in molecule_df.columns:
-            molecule_df = molecule_df[pd.isna(molecule_df["parentId"])].copy()
-
         
-        # Get molecules from indications
-        indication_molecules = set()
-        if 'id' in indication_df.columns:
-            indication_molecules = set(indication_df['id'].unique())
+        # Remove molecules with parent IDs (keep only parent molecules)
+        # EXACT COPY from original line 404
+        molecule_df = molecule_df[pd.isna(molecule_df['parentId'])]
         
-        # Get molecules from known drugs (phase 3+)
-        known_drug_molecules = set()
-        if known_drugs_df is not None and not known_drugs_df.empty:
-            if 'drugId' in known_drugs_df.columns and 'phase' in known_drugs_df.columns:
-                known_drug_molecules = set(
-                    known_drugs_df[known_drugs_df['phase'] >= 3]['drugId'].unique()
-                )
+        # 1. Molecules from approved indications
+        # EXACT COPY from original line 407
+        unique_indication_ids = set(indication_df['id'].unique())
         
-        # Get molecules with metadata links
-        metadata_molecules = set()
-        if 'linkedDiseases' in molecule_df.columns:
-            def has_linked_diseases(row):
-                if 'linkedDiseases' in row and isinstance(row['linkedDiseases'], dict):
-                    return row['linkedDiseases'].get('count', 0) > 0
-                return False
+        # 2. Molecules from known drugs (Phase 3 or 4)
+        # EXACT COPY from original lines 410-414
+        unique_known_ids = set()
+        if known_drugs_df is not None:
+            # Filter for Phase 3 and 4
+            valid_known = known_drugs_df[known_drugs_df['phase'] >= 3]
+            unique_known_ids = set(valid_known['drugId'].unique())
+        
+        # 3. Molecules with pre-linked diseases in metadata
+        # EXACT COPY from original lines 417-422
+        def has_linked_diseases(row):
+            if 'linkedDiseases' in row and isinstance(row['linkedDiseases'], dict):
+                return row['linkedDiseases'].get('count', 0) > 0
+            return False
             
-            metadata_molecules = set(
-                molecule_df[molecule_df.apply(has_linked_diseases, axis=1)]['id'].unique()
-            )
+        unique_metadata_ids = set(molecule_df[molecule_df.apply(has_linked_diseases, axis=1)]['id'].unique())
         
-        # Combine all valid molecules
-        valid_molecules = indication_molecules | known_drug_molecules | metadata_molecules
+        # Combine all valid IDs
+        # EXACT COPY from original line 425
+        all_valid_ids = unique_indication_ids | unique_known_ids | unique_metadata_ids
         
-        print(f"  Molecules in Indications: {len(indication_molecules)}")
-        print(f"  Molecules in Known Drugs (Ph 3+): {len(known_drug_molecules)}")
-        print(f"  Molecules with Metadata Links: {len(metadata_molecules)}")
-        print(f"  Total Unique Valid Molecules: {len(valid_molecules)}")
+        print(f"  Molecules in Indications: {len(unique_indication_ids)}")
+        print(f"  Molecules in Known Drugs (Ph 3+): {len(unique_known_ids)}")
+        print(f"  Molecules with Metadata Links: {len(unique_metadata_ids)}")
+        print(f"  Total Unique Valid Molecules: {len(all_valid_ids)}")
         
-        # Filter molecule dataframe
-        filtered_df = molecule_df[molecule_df['id'].isin(valid_molecules)].copy()
-        print(f"Filtered to {len(filtered_df)} molecules with validated connections")
+        # Filter molecule_df
+        # EXACT COPY from original line 433
+        filtered_molecule_df = molecule_df[molecule_df['id'].isin(all_valid_ids)]
         
-        return filtered_df
+        print(f"Filtered to {len(filtered_molecule_df)} molecules with validated connections")
+        return filtered_molecule_df
 
 
 class AssociationFilter:
