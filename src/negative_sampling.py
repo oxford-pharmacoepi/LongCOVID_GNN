@@ -687,7 +687,8 @@ class MixedNegativeSampler(NegativeSampler):
         else:
             print(f"Mixed strategy (fixed): {current_weights}")
         
-        all_negatives = []
+        # Consolidate unique negatives from all strategies
+        all_negatives_set = set()
         
         # Sample from each strategy according to weights
         for strategy_name, weight in current_weights.items():
@@ -710,29 +711,40 @@ class MixedNegativeSampler(NegativeSampler):
                     n_samples,
                     **kwargs
                 )
-                all_negatives.extend(negatives)
-                print(f"  {strategy_name}: sampled {len(negatives)}/{n_samples}")
+                original_len = len(all_negatives_set)
+                all_negatives_set.update(negatives)
+                new_len = len(all_negatives_set)
+                print(f"  {strategy_name}: added {new_len - original_len} unique negatives (requested {n_samples})")
             except Exception as e:
+                import traceback
                 print(f"  {strategy_name}: failed ({e})")
+                # print(traceback.format_exc())
         
-        # If we don't have enough, fill with random
-        if len(all_negatives) < num_samples:
-            deficit = num_samples - len(all_negatives)
-            print(f"Filling {deficit} samples with random negatives")
+        # If we don't have enough unique samples, fill with random
+        if len(all_negatives_set) < num_samples:
+            deficit = num_samples - len(all_negatives_set)
+            print(f"Filling {deficit} samples with additional random negatives to reach target {num_samples}...")
             
             random_sampler = RandomNegativeSampler(seed=self.seed, future_positives=self.future_positives)
-            used_negatives = set(all_negatives)
-            additional = random_sampler.sample(
-                positive_edges | used_negatives,
-                all_possible_pairs,
-                deficit,
-                **kwargs
-            )
-            all_negatives.extend(additional)
+            
+            # Continue sampling until target is reached or we run out of candidates
+            max_attempts = 3
+            for _ in range(max_attempts):
+                additional = random_sampler.sample(
+                    positive_edges | all_negatives_set,
+                    all_possible_pairs,
+                    deficit,
+                    **kwargs
+                )
+                all_negatives_set.update(additional)
+                deficit = num_samples - len(all_negatives_set)
+                if deficit <= 0:
+                    break
         
-        # Shuffle and return
-        random.shuffle(all_negatives)
-        return all_negatives[:num_samples]
+        # Shuffle and return exact number
+        all_negatives_list = list(all_negatives_set)
+        random.shuffle(all_negatives_list)
+        return all_negatives_list[:num_samples]
 
 
 def get_sampler(strategy: str = 'random', future_positives: Optional[Set[Tuple[int, int]]] = None, **kwargs) -> NegativeSampler:
