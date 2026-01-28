@@ -1,233 +1,212 @@
 """
-Data loading module for OpenTargets datasets.
-Handles loading raw Parquet files from OpenTargets platform.
+OpenTargets data loading module.
+Handles loading and preprocessing of raw Parquet data files.
 """
 
 import pyarrow as pa
 import pyarrow.dataset as ds
 import pyarrow.compute as pc
 import pandas as pd
-from pathlib import Path
+import glob
 
 
 class OpenTargetsLoader:
-    """Loads raw OpenTargets parquet files.
+    """Loads and preprocesses OpenTargets Parquet data.
     
-    Single Responsibility: Load and return raw data tables without transformation.
+    Single Responsibility: Load raw data files and apply basic preprocessing.
     """
     
-    def __init__(self, config=None):
-        """Initialize loader with optional configuration."""
-        self.config = config
+    def __init__(self):
+        """Initialize the loader."""
+        pass
     
     def load_indication_data(self, path):
         """Load and preprocess indication data."""
         print(f"Loading indication data from {path}")
-        indication_table = ds.dataset(path, format='parquet', exclude_invalid_files=True).to_table()
+        
+        # EXACT COPY from original lines 119-132
+        # Use glob pattern to only read parquet files, excluding index.html
+        parquet_files = glob.glob(f"{path}/*.parquet")
+        
+        if not parquet_files:
+            raise FileNotFoundError(f"No parquet files found in {path}")
+        
+        indication_dataset = ds.dataset(parquet_files, format="parquet")
+        indication_table = indication_dataset.to_table()
         
         # Filter for drugs with approved indications
-        expr = pc.list_value_length(pc.field("approvedIndications")) > 0
-        indication_table = indication_table.filter(expr)
+        expr = pc.list_value_length(pc.field("approvedIndications")) > 0 
+        filtered_indication_table = indication_table.filter(expr)
         
-        return indication_table
+        return filtered_indication_table
     
     def load_molecule_data(self, path):
         """Load and preprocess molecule data."""
         print(f"Loading molecule data from {path}")
-        molecule_table = ds.dataset(path, format='parquet', exclude_invalid_files=True).to_table()
         
-        # Convert to pandas for easier manipulation
-        molecule_df = molecule_table.to_pandas()
+        # EXACT COPY from original lines 139-163
+        # Use glob pattern to only read parquet files, excluding index.html
+        parquet_files = glob.glob(f"{path}/*.parquet")
         
-        # Filter to small molecules only
+        if not parquet_files:
+            raise FileNotFoundError(f"No parquet files found in {path}")
+        
+        molecule_dataset = ds.dataset(parquet_files, format="parquet")
+        molecule_table = molecule_dataset.to_table()
+        
+        # Clean drug type data
+        drug_type_column = pc.replace_substring(
+            molecule_table.column('drugType'), 'unknown', 'Unknown'
+        )
+        fill_value = pa.scalar('Unknown', type=pa.string())
+        molecule_table = molecule_table.drop_columns("drugType").add_column(
+            3, "drugType", drug_type_column.fill_null(fill_value)
+        )
         
         # Select relevant columns
-        relevant_columns = [
-            'id', 'name', 'drugType', 'blackBoxWarning',
-            'hasBeenWithdrawn', 'blackBoxWarning', 'yearOfFirstApproval'
-            'parentId', 'childChemblIds', 'linkedDiseases'
-        ]
+        filtered_molecule_table = molecule_table.select([
+            'id', 'name', 'drugType', 'blackBoxWarning', 'yearOfFirstApproval',
+            'parentId', 'childChemblIds', 'linkedDiseases', 'hasBeenWithdrawn', 'linkedTargets'
+        ]).flatten().drop_columns(['linkedTargets.count', 'linkedDiseases.count'])
         
-        # Add linkedDiseases if it exists
-        if 'linkedDiseases' in molecule_df.columns:
-            relevant_columns.append('linkedDiseases')
-        
-        # Filter to only existing columns
-        existing_columns = [col for col in relevant_columns if col in molecule_df.columns]
-        molecule_df = molecule_df[existing_columns].copy()
-        
-        # Convert back to PyArrow Table
-        return pa.Table.from_pandas(molecule_df)
+        return filtered_molecule_table
     
     def load_disease_data(self, path):
         """Load and preprocess disease data."""
         print(f"Loading disease data from {path}")
-        disease_table = ds.dataset(path, format='parquet', exclude_invalid_files=True).to_table()
         
-        # Convert to pandas
-        disease_df = disease_table.to_pandas()
+        # EXACT COPY from original lines 170-216
+        # Use glob pattern to only read parquet files, excluding index.html
+        parquet_files = glob.glob(f"{path}/*.parquet")
+        
+        if not parquet_files:
+            raise FileNotFoundError(f"No parquet files found in {path}")
+        
+        disease_dataset = ds.dataset(parquet_files, format="parquet")
+        disease_table = disease_dataset.to_table()
+        
+        # Filter out diseases without therapeutic areas
+        disease_table = disease_table.filter(
+            pc.list_value_length(pc.field("therapeuticAreas")) > 0
+        )
+        
+        # Filter out specific therapeutic area
+        df = disease_table.to_pandas()
+        filtered_df = df[~df['therapeuticAreas'].apply(lambda x: 'EFO_0001444' in x)]
+        disease_table = pa.Table.from_pandas(filtered_df)
         
         # Select relevant columns
-        relevant_columns = ['id', 'name', 'therapeuticAreas', 'parents']
-        existing_columns = [col for col in relevant_columns if col in disease_df.columns]
-        disease_df = disease_df[existing_columns].copy()
+        disease_table = disease_table.select([
+            'id', 'name', 'description', 'ancestors', 'descendants', 'children', 'therapeuticAreas'
+        ])
         
-        # Filter out specific therapeutic areas if configured
-        if hasattr(self, 'config') and self.config:
-            excluded_areas = [
-                'MONDO_0024458',  # Injury or poisoning
-                'OTAR_0000018',   # Genetic, familial or congenital disease
-                'EFO_0000651',    # Phenotype
-                'EFO_0001444',    # Measurement
-            ]
-            
-            if 'therapeuticAreas' in disease_df.columns:
-                def has_excluded_area(areas):
-                    # Handle None/NaN
-                    if areas is None:
-                        return False
-                    try:
-                        if pd.isna(areas):
-                            return False
-                    except (ValueError, TypeError):
-                        # areas might be an array, skip the isna check
-                        pass
-                    
-                    # Handle empty
-                    if not isinstance(areas, (list, tuple)) or len(areas) == 0:
-                        return False
-                    
-                    # Convert string to list if needed
-                    if isinstance(areas, str):
-                        import ast
-                        try:
-                            areas = ast.literal_eval(areas)
-                        except:
-                            return False
-                    
-                    return any(area in excluded_areas for area in areas)
-                
-                disease_df = disease_df[~disease_df['therapeuticAreas'].apply(has_excluded_area)].copy()
+        # Filter out unwanted prefixes
+        prefixes_to_remove = ["UBERON", "ZFA", "CL", "GO", "FBbt", "FMA"]
+        filter_conditions = [
+            pc.starts_with(disease_table.column('id'), prefix) 
+            for prefix in prefixes_to_remove
+        ]
         
-        # Convert back to PyArrow Table
-        return pa.Table.from_pandas(disease_df)
+        combined_filter = filter_conditions[0]
+        for condition in filter_conditions[1:]:
+            combined_filter = pc.or_(combined_filter, condition)
+        
+        negated_filter = pc.invert(combined_filter)
+        filtered_disease_table = disease_table.filter(negated_filter)
+        
+        # Additional filtering
+        filtered_disease_table = filtered_disease_table.filter(
+            pc.list_value_length(pc.field("descendants")) == 0
+        )
+        filtered_disease_table = filtered_disease_table.filter(
+            pc.field("id") != "EFO_0000544"
+        )
+        
+        return filtered_disease_table
     
     def load_gene_data(self, path, version):
         """Load and preprocess gene/target data."""
         print(f"Loading gene data from {path}")
         
-        # Load dataset, excluding non-parquet files
-        gene_table = ds.dataset(
-            path, 
-            format='parquet',
-            exclude_invalid_files=True
-        ).to_table()
+        # EXACT COPY from original lines 223-242
+        # Use glob pattern to only read parquet files, excluding index.html
+        parquet_files = glob.glob(f"{path}/*.parquet")
+        
+        if not parquet_files:
+            raise FileNotFoundError(f"No parquet files found in {path}")
+        
+        gene_dataset = ds.dataset(parquet_files, format="parquet")
+        gene_table = gene_dataset.to_table().flatten().flatten()
         
         # Version-specific column selection
-        if version >= 22.04:
-            relevant_columns = ['id', 'approvedSymbol', 'biotype', 'pathways']
+        if version == 21.04 or version == 21.06:
+            filtered_gene_table = gene_table.select([
+                'id', 'approvedName','bioType', 'proteinAnnotations.functions', 'reactome'
+            ]).flatten()
         else:
-            relevant_columns = ['id', 'approvedSymbol', 'bioType', 'pathways']
+            filtered_gene_table = gene_table.select([
+                'id', 'approvedName','biotype', 'functionDescriptions', 'proteinIds', 'pathways'
+            ]).flatten()
         
-        # Select only existing columns
-        existing_columns = [col for col in relevant_columns if col in gene_table.column_names]
-        gene_table = gene_table.select(existing_columns)
-        
-        return gene_table
+        return filtered_gene_table
     
     def load_associations_data(self, path, version):
         """Load and preprocess associations data."""
         print(f"Loading associations data from {path}")
-        associations_table = ds.dataset(path, format='parquet', exclude_invalid_files=True).to_table()
         
-        # Determine score column based on version
-        if version >= 22.04:
+        # EXACT COPY from original lines 245-263
+        # Use glob pattern to only read parquet files, excluding index.html
+        parquet_files = glob.glob(f"{path}/*.parquet")
+        
+        if not parquet_files:
+            raise FileNotFoundError(f"No parquet files found in {path}")
+        
+        associations_dataset = ds.dataset(parquet_files, format="parquet")
+        associations_table = associations_dataset.to_table()
+        
+        # Version-specific score column
+        if version == 21.04 or version == 21.06:
             score_column = 'score'
         else:
-            score_column = 'score'  # Same for now, but kept for clarity
-        
-        # Select relevant columns
-        relevant_columns = ['diseaseId', 'targetId', score_column]
-        existing_columns = [col for col in relevant_columns if col in associations_table.column_names]
-        associations_table = associations_table.select(existing_columns)
+            score_column = 'datasourceScores.overall'
         
         return associations_table, score_column
     
-    def load_mechanism_of_action(self, path):
-        """
-        Load mechanismOfAction dataset for drug-gene edge features.
-        
-        Returns:
-            DataFrame with columns: [chemblIds, actionType, mechanismOfAction, targetName, targets]
-        """
-        print(f"Loading mechanismOfAction data from {path}")
-        
-        try:
-            moa_table = ds.dataset(path, format='parquet', exclude_invalid_files=True).to_table()
-            moa_df = moa_table.to_pandas()
-            
-            # Select relevant columns
-            relevant_columns = ['chemblIds', 'actionType', 'mechanismOfAction', 'targetName', 'targets']
-            existing_columns = [col for col in relevant_columns if col in moa_df.columns]
-            moa_df = moa_df[existing_columns].copy()
-            
-            print(f"Loaded {len(moa_df)} mechanism of action records")
-            return moa_df
-            
-        except Exception as e:
-            print(f"Warning: Could not load mechanism of action data: {e}")
-            return pd.DataFrame()
-    
-    def load_drug_warnings(self, path):
-        """
-        Load drugWarnings dataset for enhanced drug node features.
-        
-        Returns:
-            DataFrame with drug warnings beyond black box warnings
-        """
-        print(f"Loading drugWarnings data from {path}")
-        
-        try:
-            warnings_table = ds.dataset(path, format='parquet', exclude_invalid_files=True).to_table()
-            warnings_df = warnings_table.to_pandas()
-            print(f"Loaded {len(warnings_df)} drug warning records")
-            return warnings_df
-        except Exception as e:
-            print(f"Warning: Could not load drug warnings data: {e}")
-            return pd.DataFrame()
-    
-    def load_interaction(self, path):
-        """
-        Load interaction dataset for drug-drug edges.
-        
-        Returns:
-            DataFrame with drug-drug interaction information
-        """
-        print(f"Loading interaction data from {path}")
-        
-        try:
-            interaction_table = ds.dataset(path, format='parquet', exclude_invalid_files=True).to_table()
-            interaction_df = interaction_table.to_pandas()
-            print(f"Loaded {len(interaction_df)} drug interaction records")
-            return interaction_df
-        except Exception as e:
-            print(f"Warning: Could not load interaction data: {e}")
-            return pd.DataFrame()
-    
     def load_known_drugs_aggregated(self, path):
-        """
-        Load knownDrugsAggregated dataset for clinical trial phase information.
-        
-        Returns:
-            DataFrame with clinical trial phases and approval status
-        """
+        """Load known drugs aggregated data."""
         print(f"Loading knownDrugsAggregated data from {path}")
         
-        try:
-            known_drugs_table = ds.dataset(path, format='parquet', exclude_invalid_files=True).to_table()
-            known_drugs_df = known_drugs_table.to_pandas()
-            print(f"Loaded {len(known_drugs_df)} known drug records with clinical phase info")
-            return known_drugs_df
-        except Exception as e:
-            print(f"Warning: Could not load known drugs data: {e}")
-            return pd.DataFrame()
+        # EXACT COPY from original lines 266-280
+        # Use glob pattern to only read parquet files, excluding index.html
+        parquet_files = glob.glob(f"{path}/*.parquet")
+        
+        if not parquet_files:
+            raise FileNotFoundError(f"No parquet files found in {path}")
+        
+        known_drugs_dataset = ds.dataset(parquet_files, format="parquet")
+        known_drugs_table = known_drugs_dataset.to_table()
+        
+        # Convert to pandas for easier manipulation
+        known_drugs_df = known_drugs_table.to_pandas()
+        print(f"Loaded {len(known_drugs_df)} known drug records with clinical phase info")
+        
+        return known_drugs_df
+    
+    def load_mechanism_of_action(self, path):
+        """Load mechanism of action data."""
+        print(f"Loading mechanism of action data from {path}")
+        
+        # EXACT COPY from original lines 283-296
+        # Use glob pattern to only read parquet files, excluding index.html
+        parquet_files = glob.glob(f"{path}/*.parquet")
+        
+        if not parquet_files:
+            raise FileNotFoundError(f"No parquet files found in {path}")
+        
+        moa_dataset = ds.dataset(parquet_files, format="parquet")
+        moa_table = moa_dataset.to_table()
+        
+        # Convert to pandas for easier manipulation
+        moa_df = moa_table.to_pandas()
+        
+        return moa_df
