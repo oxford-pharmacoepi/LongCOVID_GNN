@@ -23,7 +23,7 @@ class OpenTargetsLoader:
     def load_indication_data(self, path):
         """Load and preprocess indication data."""
         print(f"Loading indication data from {path}")
-        indication_table = ds.dataset(path, format='parquet').to_table()
+        indication_table = ds.dataset(path, format='parquet', exclude_invalid_files=True).to_table()
         
         # Filter to only approved indications
         indication_table = indication_table.filter(
@@ -62,7 +62,7 @@ class OpenTargetsLoader:
     def load_disease_data(self, path):
         """Load and preprocess disease data."""
         print(f"Loading disease data from {path}")
-        disease_table = ds.dataset(path, format='parquet').to_table()
+        disease_table = ds.dataset(path, format='parquet', exclude_invalid_files=True).to_table()
         
         # Convert to pandas
         disease_df = disease_table.to_pandas()
@@ -123,7 +123,7 @@ class OpenTargetsLoader:
     def load_associations_data(self, path, version):
         """Load and preprocess associations data."""
         print(f"Loading associations data from {path}")
-        associations_table = ds.dataset(path, format='parquet').to_table()
+        associations_table = ds.dataset(path, format='parquet', exclude_invalid_files=True).to_table()
         
         # Determine score column based on version
         if version >= 22.04:
@@ -148,7 +148,7 @@ class OpenTargetsLoader:
         print(f"Loading mechanismOfAction data from {path}")
         
         try:
-            moa_table = ds.dataset(path, format='parquet').to_table()
+            moa_table = ds.dataset(path, format='parquet', exclude_invalid_files=True).to_table()
             moa_df = moa_table.to_pandas()
             
             # Select relevant columns
@@ -173,7 +173,7 @@ class OpenTargetsLoader:
         print(f"Loading drugWarnings data from {path}")
         
         try:
-            warnings_table = ds.dataset(path, format='parquet').to_table()
+            warnings_table = ds.dataset(path, format='parquet', exclude_invalid_files=True).to_table()
             warnings_df = warnings_table.to_pandas()
             print(f"Loaded {len(warnings_df)} drug warning records")
             return warnings_df
@@ -191,7 +191,7 @@ class OpenTargetsLoader:
         print(f"Loading interaction data from {path}")
         
         try:
-            interaction_table = ds.dataset(path, format='parquet').to_table()
+            interaction_table = ds.dataset(path, format='parquet', exclude_invalid_files=True).to_table()
             interaction_df = interaction_table.to_pandas()
             print(f"Loaded {len(interaction_df)} drug interaction records")
             return interaction_df
@@ -209,7 +209,7 @@ class OpenTargetsLoader:
         print(f"Loading knownDrugsAggregated data from {path}")
         
         try:
-            known_drugs_table = ds.dataset(path, format='parquet').to_table()
+            known_drugs_table = ds.dataset(path, format='parquet', exclude_invalid_files=True).to_table()
             known_drugs_df = known_drugs_table.to_pandas()
             print(f"Loaded {len(known_drugs_df)} known drug records with clinical phase info")
             return known_drugs_df
