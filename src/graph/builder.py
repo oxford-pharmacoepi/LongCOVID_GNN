@@ -6,8 +6,12 @@ import os
 import torch
 import datetime as dt
 import pandas as pd
+import numpy as np
+import ast
+import re
 from torch_geometric.data import Data
 import torch_geometric.transforms as T
+from torch_geometric.utils import remove_isolated_nodes, subgraph, dropout_adj
 
 from src.data_processing import DataProcessor, detect_data_mode
 from src.features.node import NodeFeatureBuilder
@@ -127,46 +131,55 @@ class GraphBuilder:
         print("Raw data processing completed")
         
     def _parse_list_columns(self):
-        """Helper to parse stringified list columns in loaded CSVs."""
-        # Indication
-        if 'approvedIndications' in self.indication_df.columns:
-            self.indication_df['approvedIndications'] = self.indication_df['approvedIndications'].apply(
-                lambda x: eval(x) if isinstance(x, str) and x.startswith('[') else x
-            )
+        """Parse stringified list/numpy array columns back into lists."""
         
-        # Molecule
-        if 'linkedDiseases.rows' in self.molecule_df.columns:
-            self.molecule_df['linkedDiseases.rows'] = self.molecule_df['linkedDiseases.rows'].apply(
-                lambda x: eval(x) if isinstance(x, str) and x.startswith('[') else x
-            )
-            
-        # Disease (numpy array strings)
-        from src.graph.edges import GraphEdgeBuilder 
-        # Reuse logic or reimplement simple parser
-        # For brevity, implementing simple one here or we could put this in utils.common?
-        # Let's implement robustly.
-        pass # The logic is in original script lines 82-122. I will implement it fully below.
+        def safe_parse(val):
+            if val is None:
+                return []
+            if isinstance(val, (list, np.ndarray)):
+                return [str(x) for x in val] if hasattr(val, '__iter__') else []
+            if not isinstance(val, str):
+                return []
+            val = val.strip()
+            if not val or val == 'nan':
+                return []
+            if val.startswith('[') and val.endswith(']'):
+                try:
+                    res = ast.literal_eval(val)
+                    if isinstance(res, list):
+                        return [str(x) for x in res]
+                    return [str(res)]
+                except:
+                    inner = val[1:-1].strip()
+                    if not inner: return []
+                    if ',' not in inner:
+                        return [item.strip(" '\"") for item in re.split(r'\s+', inner) if item.strip()]
+                    else:
+                        return [item.strip(" '\"") for item in inner.split(',') if item.strip()]
+            return [val]
 
-        def parse_numpy_array_string(value):
-            if not isinstance(value, str): return value if isinstance(value, list) else []
-            value = value.strip()
-            if value.startswith('[') and value.endswith(']'):
-                inner = value[1:-1].strip()
-                if not inner: return []
-                # Simple split by space/newline respecting quotes
-                items = []; current_item = ""; in_quotes = False
-                for char in inner:
-                    if char == "'" or char == '"': in_quotes = not in_quotes
-                    elif char in (' ', '\n', '\t') and not in_quotes:
-                        if current_item: items.append(current_item); current_item = ""
-                    else: current_item += char
-                if current_item: items.append(current_item)
-                return items
-            return []
-            
-        for col in ['ancestors', 'descendants', 'children', 'therapeuticAreas']:
-            if col in self.disease_df.columns:
-                self.disease_df[col] = self.disease_df[col].apply(parse_numpy_array_string)
+        # Keep only necessary columns to avoid Arrow issues with unused metadata
+        mol_needed = ['id', 'drugType', 'blackBoxWarning', 'yearOfFirstApproval', 'parentId', 'childChemblIds', 'linkedTargets.rows', 'linkedDiseases.rows']
+        self.molecule_df = self.molecule_df[[c for c in mol_needed if c in self.molecule_df.columns]]
+        
+        dis_needed = ['id', 'name', 'description', 'therapeuticAreas', 'parents', 'children', 'ancestors', 'descendants']
+        self.disease_df = self.disease_df[[c for c in dis_needed if c in self.disease_df.columns]]
+
+        # Molecule columns
+        if 'blackBoxWarning' in self.molecule_df.columns:
+             self.molecule_df['blackBoxWarning'] = self.molecule_df['blackBoxWarning'].apply(lambda x: x if isinstance(x, bool) else (str(x).lower() == 'true'))
+        
+        list_cols = {
+            'molecule_df': ['linkedTargets.rows', 'linkedDiseases.rows', 'tradeNames', 'synonyms', 'urls'],
+            'indication_df': ['approvedIndications'], # Added indication_df here
+            'disease_df': ['therapeuticAreas', 'parents', 'children', 'ancestors', 'descendants', 'synonyms']
+        }
+        
+        for df_name, cols in list_cols.items():
+            df = getattr(self, df_name)
+            for col in cols:
+                if col in df.columns:
+                    df[col] = df[col].apply(safe_parse)
 
     def create_node_features(self):
         """Delegate node feature creation."""
@@ -251,5 +264,143 @@ class GraphBuilder:
         # Convert to undirected
         graph = T.ToUndirected()(graph)
         
+        # Prune graph to ensure connectivity (remove isolated nodes)
+        graph = self._prune_graph(graph)
+        
+        # We don't save mappings to 'processed' here anymore because it might 
+        # break the ability to re-run different graph configs.
+        # The script calling the builder should handle saving result mappings.
+        
         print(f"Graph created: {graph.x.size(0):,} nodes, {graph.edge_index.size(1):,} edges")
+        return graph
+
+    def _prune_graph(self, graph):
+        """
+        Prune graph to remove isolated nodes and ensure a single connected component if possible.
+        Updates metadata counts accordingly.
+        """
+        print("\nPruning graph (removing isolated nodes)...")
+        num_nodes_before = graph.x.size(0)
+        
+        # 1. Identify isolated nodes
+        edge_index = graph.edge_index
+        node_indices = torch.unique(edge_index)
+        
+        mask = torch.zeros(num_nodes_before, dtype=torch.bool)
+        mask[node_indices] = True
+        
+        # 2. Re-map indices for all edge tensors
+        # PyG remove_isolated_nodes only handles the main edge_index
+        # We need to handle train/val/test too
+        
+        # Get the mapping from old index to new index
+        old_to_new = torch.full((num_nodes_before,), -1, dtype=torch.long)
+        new_nodes_count = mask.sum().item()
+        old_to_new[mask] = torch.arange(new_nodes_count)
+        
+        # Filter and remap labels
+        def filter_and_remap(edge_tensor, labels):
+            # edge_tensor is [N, 2]
+            src = edge_tensor[:, 0]
+            dst = edge_tensor[:, 1]
+            
+            # Keep only pairs where both nodes exist in the pruned graph
+            valid_mask = mask[src] & mask[dst]
+            
+            new_edge_tensor = torch.stack([
+                old_to_new[src[valid_mask]],
+                old_to_new[dst[valid_mask]]
+            ], dim=1)
+            
+            new_labels = labels[valid_mask]
+            return new_edge_tensor, new_labels
+            
+        print(f"  Filtering {graph.train_edge_index.size(0):,} training pairs...")
+        graph.train_edge_index, graph.train_edge_label = filter_and_remap(
+            graph.train_edge_index, graph.train_edge_label
+        )
+        
+        print(f"  Filtering {graph.val_edge_index.size(0):,} validation pairs...")
+        graph.val_edge_index, graph.val_edge_label = filter_and_remap(
+            graph.val_edge_index, graph.val_edge_label
+        )
+        
+        print(f"  Filtering {graph.test_edge_index.size(0):,} test pairs...")
+        graph.test_edge_index, graph.test_edge_label = filter_and_remap(
+            graph.test_edge_index, graph.test_edge_label
+        )
+        
+        # Update node features and metadata
+        # We must know how many of each type were removed to update metadata accurately
+        # Order: Drugs, DrugType, Genes, Reactome, Disease, Therapeutic
+        node_info = graph.metadata['node_info']
+        new_node_info = {}
+        
+        current_idx = 0
+        for type_name, count in node_info.items():
+            type_mask = torch.zeros(num_nodes_before, dtype=torch.bool)
+            type_mask[current_idx:current_idx + count] = True
+            
+            # Nodes of this type that were kept
+            kept_count = (type_mask & mask).sum().item()
+            new_node_info[type_name] = kept_count
+            current_idx += count
+            if count != kept_count:
+                print(f"  Removed {count - kept_count} isolated {type_name}")
+        
+        graph.metadata['node_info'] = new_node_info
+        graph.metadata['total_nodes'] = new_nodes_count
+        graph.x = graph.x[mask]
+        
+        # Remap main edge_index
+        graph.edge_index = old_to_new[graph.edge_index]
+        
+        # Update mappings in self.mappings to stay in sync with pruned indices
+        if hasattr(self, 'mappings') and self.mappings:
+            print("  Syncing mappings with pruned indices...")
+            for map_name, mapping in self.mappings.items():
+                if not isinstance(mapping, dict):
+                    continue
+                
+                new_mapping = {}
+                count_removed = 0
+                for key, old_idx in mapping.items():
+                    # Ensure old_idx is within range
+                    if old_idx >= num_nodes_before:
+                        continue
+                        
+                    new_idx = old_to_new[old_idx].item()
+                    if new_idx != -1:
+                        new_mapping[key] = new_idx
+                    else:
+                        count_removed += 1
+                
+                self.mappings[map_name] = new_mapping
+                
+                # Also synchronise the corresponding list if it exists
+                list_name = map_name.replace('_key_mapping', '_list')
+                if list_name in self.mappings:
+                    # Sort the keys that were kept by their new global indices
+                    # and create the list in that order
+                    kept_keys_with_indices = []
+                    for key, ni in new_mapping.items():
+                        kept_keys_with_indices.append((key, ni))
+                    
+                    # Sort by index
+                    kept_keys_with_indices.sort(key=lambda x: x[1])
+                    
+                    # New list is just the keys in that order
+                    new_list = [x[0] for x in kept_keys_with_indices]
+                    self.mappings[list_name] = new_list
+                    print(f"    - Updated {list_name}: filtered to {len(new_list)} items")
+                
+                if count_removed > 0:
+                    print(f"    - Updated {map_name}: removed {count_removed} keys")
+        
+        print(f"  Dataset pruned from {num_nodes_before:,} to {new_nodes_count:,} nodes.")
+        
+        # 3. Strictly ensure one component if requested (largest component)
+        # Note: We already remove isolated nodes above. 
+        # For now, isolated nodes is usually enough to connect everyone who has edges.
+        
         return graph

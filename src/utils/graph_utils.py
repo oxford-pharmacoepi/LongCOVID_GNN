@@ -177,15 +177,16 @@ def find_repurposing_edges(table1, table2, column_name, source_mapping, target_m
     return new_edge_list
 
 
-def create_disease_similarity_edges_from_ancestors(disease_table, disease_key_mapping, min_shared_ancestors=1):
+def create_disease_similarity_edges_from_ancestors(disease_table, disease_key_mapping, 
+                                                   max_children_per_parent=10, min_shared_ancestors=1):
     """
-    Create disease-disease similarity edges based on shared DIRECT PARENT ancestor.
+    Create disease-disease similarity edges based on shared direct parent ancestor.
     """
     import pandas as pd
     import numpy as np
     from collections import defaultdict
     
-    print(f"    Building disease similarity network from shared DIRECT PARENT...")
+    print(f"    Building disease similarity network from shared direct parent...")
     
     # Extract disease IDs and their ancestors
     disease_df = disease_table.select(['id', 'ancestors']).to_pandas()
@@ -225,7 +226,12 @@ def create_disease_similarity_edges_from_ancestors(disease_table, disease_key_ma
     shared_ancestor_counts = defaultdict(int)
     
     # For each ancestor, connect all diseases that share it
+    # Only use parents that are specific enough
     for ancestor_id, disease_set in ancestor_to_diseases.items():
+        if len(disease_set) > max_children_per_parent:
+            print(f"    Skipping extremely common parent {ancestor_id} ({len(disease_set)} diseases)")
+            continue
+            
         disease_list = list(disease_set)
         
         # Create edges between all pairs of diseases that share this ancestor
@@ -247,67 +253,17 @@ def create_disease_similarity_edges_from_ancestors(disease_table, disease_key_ma
             edges.append((idx1, idx2))
             edges.append((idx2, idx1))
     
-    print(f"    Created {len(edges)} disease-disease similarity edges (from direct parent)")
+    print(f"    Created {len(edges)} disease-disease similarity edges (threshold={min_shared_ancestors})")
     print(f"    Unique disease pairs: {len(edges) // 2}")
     
     return edges
 
 
-def create_disease_hierarchy_edges(disease_table, disease_key_mapping):
-    """
-    Create disease-disease edges using direct parent-child relationships.
-    """
-    import pandas as pd
-    import numpy as np
-    
-    print(f"    Building disease hierarchy edges...")
-    
-    edges = []
-    
-    # Check which columns are available
-    available_cols = ['id']
-    if 'children' in disease_table.column_names:
-        available_cols.append('children')
-    if 'descendants' in disease_table.column_names:
-        available_cols.append('descendants')
-    
-    disease_df = disease_table.select(available_cols).to_pandas()
-    
-    # Create edges from children relationships
-    if 'children' in available_cols:
-        for _, row in disease_df.iterrows():
-            parent_id = row['id']
-            children = row['children']
-            
-            if parent_id not in disease_key_mapping:
-                continue
-            
-            if children is None:
-                continue
-            
-            # Convert numpy array to list if needed
-            if isinstance(children, np.ndarray):
-                children = children.tolist()
-            
-            if not isinstance(children, list):
-                continue
-            
-            parent_idx = disease_key_mapping[parent_id]
-            
-            # Connect parent to children (if children are also in our graph)
-            for child_id in children:
-                if child_id in disease_key_mapping:
-                    child_idx = disease_key_mapping[child_id]
-                    edges.append((parent_idx, child_idx))
-                    edges.append((child_idx, parent_idx))  # Bidirectional edges
-    
-    print(f"    Created {len(edges)} disease hierarchy edges")
-    
-    return edges
 
 
-def custom_edges(disease_similarity_network, trial_edges, molecule_similarity_network,
-                filtered_disease_table, filtered_molecule_table,
+
+def custom_edges(disease_similarity_network, disease_similarity_max_children, disease_similarity_min_shared,
+                trial_edges, filtered_disease_table, filtered_molecule_table,
                 disease_key_mapping, drug_key_mapping):
     """Generate custom edges for enhanced graph connectivity."""
     
@@ -317,60 +273,29 @@ def custom_edges(disease_similarity_network, trial_edges, molecule_similarity_ne
     
     custom_edges = []
 
-    # Disease similarity network edges
+    # Disease similarity network edges (shared ancestors)
     if disease_similarity_network:
         print("\n>>> Processing Disease Similarity Network...")
-        print(f"    Disease table shape: {filtered_disease_table.shape}")
-        print(f"    Disease key mapping size: {len(disease_key_mapping)}")
-        
-        # Create disease-disease edges based on shared ancestors
         try:
-            # Method 1: Similarity edges from shared ancestors
-            print("\n    [1] Creating similarity edges from shared ancestors...")
             similarity_edges = create_disease_similarity_edges_from_ancestors(
                 filtered_disease_table, 
-                disease_key_mapping, 
-                min_shared_ancestors=1  
+                disease_key_mapping,
+                max_children_per_parent=disease_similarity_max_children,
+                min_shared_ancestors=disease_similarity_min_shared
             )
             custom_edges.extend(similarity_edges)
-            
-            # Method 2: Direct hierarchy edges (parent-child within our disease set)
-            print("\n    [2] Creating direct hierarchy edges...")
-            hierarchy_edges = create_disease_hierarchy_edges(
-                filtered_disease_table,
-                disease_key_mapping
-            )
-            custom_edges.extend(hierarchy_edges)
-            
         except Exception as e:
-            print(f"        ERROR creating disease edges: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        print(f"\n    Total disease similarity edges collected: {len(custom_edges)}")
+            print(f"        ERROR creating similarity edges: {e}")
+            
 
     # Trial edges
     if trial_edges:
         print("\n>>> Processing Trial Edges...")
-        molecule_trial_table = filtered_molecule_table.select(['id', 'linkedDiseases']).flatten()
+        molecule_trial_table = filtered_molecule_table.select(['id', 'linkedDiseases.rows']).flatten()
         trial_edges_list = extract_edges(molecule_trial_table, drug_key_mapping, disease_key_mapping, return_edge_list=True, debug=False)
         print(f"    Extracted {len(trial_edges_list)} trial edges")
         custom_edges.extend(trial_edges_list)
 
-    # Molecule similarity network edges
-    if molecule_similarity_network:
-        print("\n>>> Processing Molecule Similarity Network...")
-        molecule_parents_table = filtered_molecule_table.select(['id', 'parentId']).flatten()
-        molecule_children_table = filtered_molecule_table.select(['id', 'childChemblIds']).flatten()
-
-        parent_edges = extract_edges(molecule_parents_table, drug_key_mapping, drug_key_mapping, return_edge_list=True, debug=False)
-        children_edges = extract_edges(molecule_children_table, drug_key_mapping, drug_key_mapping, return_edge_list=True, debug=False)
-        
-        print(f"    Extracted {len(parent_edges)} parent edges")
-        print(f"    Extracted {len(children_edges)} children edges")
-        
-        custom_edges.extend(parent_edges)
-        custom_edges.extend(children_edges)
 
     # Handle empty case : return tensor with shape [2, 0]
     print(f"\n>>> FINAL RESULT: {len(custom_edges)} total custom edges")

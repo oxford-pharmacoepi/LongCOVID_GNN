@@ -48,19 +48,22 @@ class GraphEdgeBuilder:
             self._extract_standard_edges(mappings, molecule_df, indication_df, disease_df, known_drugs_df)
         
         # Extract custom edges (re-generated even in processed mode as they depend on config filters)
-        # Note: If custom edges were saved, we might want to load them too, but original script regenerates them.
         custom_edge_tensor = self._extract_custom_edges(mappings, molecule_df, disease_df)
         
-        # Combine all edges
+        # Combine all edges in a specific order
         all_edges = [
-            self.edges['molecule_drugType'],
-            self.edges['molecule_disease'],
-            self.edges['molecule_gene'],
-            self.edges['gene_reactome'],
-            self.edges['disease_therapeutic'],
-            self.edges['disease_gene']
+            self.edges.get('molecule_drugType', torch.empty((2, 0), dtype=torch.long)),
+            self.edges.get('molecule_disease', torch.empty((2, 0), dtype=torch.long)),
+            self.edges.get('molecule_gene', torch.empty((2, 0), dtype=torch.long)),
+            self.edges.get('gene_reactome', torch.empty((2, 0), dtype=torch.long)),
+            self.edges.get('disease_therapeutic', torch.empty((2, 0), dtype=torch.long)),
+            self.edges.get('disease_gene', torch.empty((2, 0), dtype=torch.long))
         ]
         
+        # Add high-connectivity networks only if enabled
+        if self.config.network_config.get('use_ppi_network', False):
+            all_edges.append(self.edges.get('gene_gene', torch.empty((2, 0), dtype=torch.long)))
+            
         if custom_edge_tensor.size(1) > 0:
             all_edges.append(custom_edge_tensor)
             
@@ -75,10 +78,6 @@ class GraphEdgeBuilder:
         print(f"Total edges in graph: {all_edge_index.size(1)}")
         
         # Create edge features
-        # If processed mode, we might want to load features if they exist?
-        # Original script extract_edge_features() loads MoA data again.
-        # But it also saves standard edges. It does NOT save edge features in create_edges function?
-        # Wait, create_edge_features() is called in GraphBuilder.
         all_edge_features = self._create_edge_features(all_edge_index, mappings)
         
         # Save standard edges if in raw mode
@@ -99,9 +98,16 @@ class GraphEdgeBuilder:
             self.edges['gene_reactome'] = torch.load(f"{edge_dir}4_gene_reactome_edges.pt")
             self.edges['disease_therapeutic'] = torch.load(f"{edge_dir}5_disease_therapeutic_edges.pt")
             self.edges['disease_gene'] = torch.load(f"{edge_dir}6_disease_gene_edges.pt")
+            
+            # Optional high-connectivity edges
+            if self.config.network_config.get('use_ppi_network', False):
+                if os.path.exists(f"{edge_dir}7_gene_gene_edges.pt"):
+                    self.edges['gene_gene'] = torch.load(f"{edge_dir}7_gene_gene_edges.pt")
+                    print("  - Loaded Gene-Gene interactions")
+                
         except FileNotFoundError as e:
             raise FileNotFoundError(f"Could not load processed edges from {edge_dir}. "
-                                  f"Run with force-mode='raw' first. Error: {e}")
+                                   f"Run with force-mode='raw' first. Error: {e}")
 
     def _save_edges(self):
         """Save extracted edges to processed files."""
@@ -114,6 +120,9 @@ class GraphEdgeBuilder:
         torch.save(self.edges['gene_reactome'], f"{edge_dir}4_gene_reactome_edges.pt")
         torch.save(self.edges['disease_therapeutic'], f"{edge_dir}5_disease_therapeutic_edges.pt")
         torch.save(self.edges['disease_gene'], f"{edge_dir}6_disease_gene_edges.pt")
+        
+        if 'gene_gene' in self.edges and self.edges['gene_gene'].size(1) > 0:
+            torch.save(self.edges['gene_gene'], f"{edge_dir}7_gene_gene_edges.pt")
 
     def _extract_standard_edges(self, mappings, molecule_df, indication_df, disease_df, known_drugs_df):
         """Extract all standard edge types."""
@@ -123,7 +132,6 @@ class GraphEdgeBuilder:
         molecule_table = pa.Table.from_pandas(molecule_df)
         indication_table = pa.Table.from_pandas(indication_df)
         
-        # Disease table with schema
         disease_schema = self._get_disease_schema(disease_df)
         disease_table = pa.Table.from_pandas(disease_df, schema=disease_schema)
         
@@ -188,6 +196,69 @@ class GraphEdgeBuilder:
             mappings['disease_key_mapping'],
             mappings['gene_key_mapping']
         )
+        
+        # 7. Gene-Gene
+        if self.config.network_config.get('use_ppi_network', False):
+            print("Extracting Gene-Gene interactions...")
+            edges = self._extract_gene_gene_edges(mappings)
+            if edges.size(1) > 0:
+                mask = edges[0] != edges[1]
+                if not mask.all():
+                    print(f"  Removed {(~mask).sum().item()} self-loops from PPI edges")
+                    edges = edges[:, mask]
+            self.edges['gene_gene'] = edges
+        else:
+            self.edges['gene_gene'] = torch.empty((2, 0), dtype=torch.long)
+            
+        # 8. Disease-Disease
+        self.edges['disease_disease'] = torch.empty((2, 0), dtype=torch.long)
+
+    def _extract_gene_gene_edges(self, mappings):
+        """Extract high-confidence gene-gene interaction edges."""
+        interaction_path = self.config.paths.get('interaction')
+        if not interaction_path or not os.path.exists(interaction_path):
+            print("  Warning: Interaction data path not found")
+            return torch.empty((2, 0), dtype=torch.long)
+            
+        interaction_table = self.processor.load_interaction(interaction_path)
+        
+        # Convert to pandas for filtering
+        # Note: Large table, but we only need human and high confidence
+        df = interaction_table.select(['targetA', 'targetB', 'speciesA', 'speciesB', 'scoring']).to_pandas()
+        
+        # Filter for human (taxon_id 9606)
+        def is_human(x):
+            if isinstance(x, dict): return x.get('taxon_id') == 9606
+            return False
+            
+        mask = df['speciesA'].apply(is_human) & df['speciesB'].apply(is_human)
+        
+        # Filter by scoring threshold (default 0.5 if not in config)
+        threshold = self.config.network_config.get('ppi_score_threshold', 0.5)
+        mask = mask & (df['scoring'] >= threshold)
+        
+        df = df[mask]
+        print(f"  - Found {len(df):,} high-confidence human interactions")
+        
+        # Keep only edges where both genes are in our mapping
+        gene_mapping = mappings['gene_key_mapping']
+        df = df[df['targetA'].isin(gene_mapping) & df['targetB'].isin(gene_mapping)]
+        print(f"  - {len(df):,} interactions between mapped genes")
+        
+        edges_set = set()
+        for _, row in df.iterrows():
+            u = gene_mapping[row['targetA']]
+            v = gene_mapping[row['targetB']]
+            if u != v:
+                edges_set.add(tuple(sorted((u, v))))
+        
+        print(f"  - Unique undirected Gene-Gene edges: {len(edges_set):,}")
+        
+        if not edges_set:
+            return torch.empty((2, 0), dtype=torch.long)
+            
+        return torch.tensor(list(edges_set), dtype=torch.long).t().contiguous()
+
 
     def _extract_drug_disease_edges(self, molecule_df, indication_table, known_drugs_df, mappings):
         """Extract drug-disease edges from indications, known drugs, and metadata."""
@@ -220,17 +291,16 @@ class GraphEdgeBuilder:
     def _extract_custom_edges(self, mappings, molecule_df, disease_df):
         """Extract custom edges (similarity, trials, etc.)."""
         print("\nChecking for custom edge types...")
-        disease_similarity_enabled = self.config.network_config.get('disease_similarity_network', False)
+        # Map new config names to the variables used here
+        disease_similarity_enabled = self.config.network_config.get('use_disease_similarity', False)
         trial_edges_enabled = self.config.network_config.get('trial_edges', False)
-        molecule_similarity_enabled = self.config.network_config.get('molecule_similarity_network', False)
         
-        if not (disease_similarity_enabled or trial_edges_enabled or molecule_similarity_enabled):
+        if not (disease_similarity_enabled or trial_edges_enabled):
             print("  No custom edges enabled - skipping")
             return torch.empty((2, 0), dtype=torch.long)
             
         print(f"  Disease similarity network: {disease_similarity_enabled}")
         print(f"  Trial edges: {trial_edges_enabled}")
-        print(f"  Molecule similarity network: {molecule_similarity_enabled}")
         
         disease_schema = self._get_disease_schema(disease_df)
         disease_table = pa.Table.from_pandas(disease_df, schema=disease_schema)
@@ -238,13 +308,24 @@ class GraphEdgeBuilder:
         
         custom_edge_tensor = custom_edges(
             disease_similarity_network=disease_similarity_enabled,
+            disease_similarity_max_children=self.config.network_config.get('disease_similarity_max_children', 10),
+            disease_similarity_min_shared=self.config.network_config.get('disease_similarity_min_shared', 1),
             trial_edges=trial_edges_enabled,
-            molecule_similarity_network=molecule_similarity_enabled,
             filtered_disease_table=disease_table,
             filtered_molecule_table=molecule_table,
             disease_key_mapping=mappings['disease_key_mapping'],
             drug_key_mapping=mappings['drug_key_mapping']
         )
+        
+        # Important: Remove self-loops (edges where source == destination)
+        # Probably none in the graph, but kept for safety
+        if custom_edge_tensor.size(1) > 0:
+            self_loop_mask = custom_edge_tensor[0] != custom_edge_tensor[1]
+            if not self_loop_mask.all():
+                num_self_loops = (~self_loop_mask).sum().item()
+                print(f"  Removed {num_self_loops} self-loops from custom edges")
+                custom_edge_tensor = custom_edge_tensor[:, self_loop_mask]
+                
         print(f"  Custom edges created: {custom_edge_tensor.shape}")
         return custom_edge_tensor
 
@@ -302,7 +383,7 @@ class GraphEdgeBuilder:
             # Copy drug-gene edge features to the correct position
             all_edge_features[edge_offset:edge_offset + num_drug_gene_edges] = drug_gene_edge_features
             
-            print(f"\n✓ Created edge feature matrix: {all_edge_features.shape}")
+            print(f"\n Created edge feature matrix: {all_edge_features.shape}")
             print(f"  - Drug-gene edges with features: {num_drug_gene_edges}")
             print(f"  - Total edges: {total_edges}")
             print(f"  - Feature dimension: {feature_dim}")

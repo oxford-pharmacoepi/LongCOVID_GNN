@@ -64,9 +64,8 @@ class Config:
             'out_channels': 32,
             'num_layers': 2,
             'dropout_rate': 0.4870800162873122,
-            'num_epochs': 500,
-            'patience': 30,
-            'batch_size': 1024,
+            'num_epochs': 200,
+            'patience': 50,
             'heads': 2,
             'concat': True 
         }
@@ -80,10 +79,13 @@ class Config:
         
         # Network settings
         self.network_config = {
-            'disease_similarity_network': False,  # Enable disease-disease edges
-            'molecule_similarity_network': False,  # Enable molecule-molecule edges (K: still not fully tested)
+            'use_ppi_network': True,              # Enable gene-gene edges
+            'ppi_score_threshold': 0.7,           # Confidence threshold for gene-gene interactions (0.0 to 1.0)
+            'use_disease_similarity': True,      # Enable disease-disease edges (shared parents)
+            'disease_similarity_max_children': 10, # Max children per parent for disease similarity (higher = less specific)
+            'disease_similarity_min_shared': 1,   # Min shared parents required to create edge (1 = share at least one parent)
             'reactome_network': False,
-            'trial_edges': False
+            'trial_edges': True                   # Link molecules to linkedDiseases metadata (additional drug-disease edges)
         }
         
         # Explainer settings

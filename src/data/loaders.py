@@ -210,3 +210,16 @@ class OpenTargetsLoader:
         moa_df = moa_table.to_pandas()
         
         return moa_df
+
+    def load_interaction(self, path):
+        """Load gene-gene interaction data."""
+        print(f"Loading interaction data from {path}")
+        
+        parquet_files = glob.glob(f"{path}/*.parquet")
+        if not parquet_files:
+            raise FileNotFoundError(f"No parquet files found in {path}")
+        
+        interaction_dataset = ds.dataset(parquet_files, format="parquet")
+        interaction_table = interaction_dataset.to_table()
+        
+        return interaction_table

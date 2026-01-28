@@ -79,6 +79,12 @@ def main():
         # Log graph artifact
         tracker.log_artifact(graph_path, "graphs")
         
+        # Save final mappings alongside the graph
+        mappings_result_path = graph_path.replace('.pt', '_mappings/')
+        os.makedirs(mappings_result_path, exist_ok=True)
+        builder.processor.save_mappings(builder.mappings, mappings_result_path)
+        print(f"Final mappings saved to: {mappings_result_path}")
+        
         # Run analysis if requested
         if args.analyze:
             print("\nRunning graph analysis...")

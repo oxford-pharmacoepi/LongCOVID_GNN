@@ -125,7 +125,7 @@ class DataSplitter:
         # Sample ALL negatives at once
         all_positive_edges = train_edges_set | new_val_edges_set | new_test_edges_set
         
-        print(f"\n✨ Sampling ALL {total_negatives_needed} negatives at once...")
+        print(f"\nSampling ALL {total_negatives_needed} negatives at once...")
         sampler = self._create_sampler(future_positives=new_val_edges_set | new_test_edges_set)
         all_negative_pairs = sampler.sample(
             positive_edges=all_positive_edges,
@@ -134,7 +134,7 @@ class DataSplitter:
             edge_index=all_edge_index,
             node_features=all_features
         )
-        print(f"✓ Sampled {len(all_negative_pairs)} unique negatives")
+        print(f"Sampled {len(all_negative_pairs)} unique negatives")
         
         # Randomly split negatives
         random.seed(self.config.seed)

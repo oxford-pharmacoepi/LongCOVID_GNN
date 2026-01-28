@@ -68,7 +68,7 @@ def validate_temporal_consistency(train_negatives: Set[Tuple[int, int]],
         print("   This causes temporal leakage and unreliable evaluation.")
         print("   Recommendation: Exclude these edges from negative sampling.")
     else:
-        print(f"\n✓ No temporal leakage detected - training negatives are clean!")
+        print(f"\nNo temporal leakage detected - training negatives are clean!")
     
     print("="*80 + "\n")
     
@@ -321,7 +321,7 @@ class HardNegativeSampler(NegativeSampler):
             selected_cn_min = cn_scores[num_samples - 1][0]
             selected_cn_max = cn_scores[0][0]
             
-            print(f"\n✓ Selected {len(hard_negatives):,} hard negatives")
+            print(f"\nSelected {len(hard_negatives):,} hard negatives")
             print(f"  CN range: [{selected_cn_min} - {selected_cn_max}]")
             
             return hard_negatives
@@ -359,7 +359,7 @@ class HardNegativeSampler(NegativeSampler):
             # Shuffle to mix hard and random
             random.shuffle(all_negatives)
             
-            print(f"\n✓ Selected {len(all_negatives):,} total negatives:")
+            print(f"\nSelected {len(all_negatives):,} total negatives:")
             print(f"  - {num_hard:,} hard negatives ({100*num_hard/len(all_negatives):.1f}%)")
             print(f"  - {len(random_negatives):,} random negatives ({100*len(random_negatives)/len(all_negatives):.1f}%)")
             
