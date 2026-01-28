@@ -181,7 +181,7 @@ class DataProcessor:
                     return_edge_set=True
                 )
                 # Only keep new edges not in training
-                val_edges = list(val_edges_set - train_edges_set)
+                val_edges = val_edges_set - train_edges_set
         
         # Load test version data (24.06)
         if config.test_version:
@@ -197,7 +197,7 @@ class DataProcessor:
                 )
                 # Only keep new edges not in training or validation
                 all_seen = train_edges_set | set(val_edges)
-                test_edges = list(test_edges_set - all_seen)
+                test_edges = test_edges_set - all_seen
         
         print(f"Validation set: {len(val_edges)} new edges")
         print(f"Test set: {len(test_edges)} new edges")
