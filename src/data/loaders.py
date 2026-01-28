@@ -40,12 +40,12 @@ class OpenTargetsLoader:
         molecule_df = molecule_table.to_pandas()
         
         # Filter to small molecules only
-        molecule_df = molecule_df[molecule_df['drugType'] == 'Small molecule'].copy()
         
         # Select relevant columns
         relevant_columns = [
-            'id', 'name', 'drugType', 'maximumClinicalTrialPhase',
+            'id', 'name', 'drugType', 'blackBoxWarning',
             'hasBeenWithdrawn', 'blackBoxWarning', 'yearOfFirstApproval'
+            'parentId', 'childChemblIds', 'linkedDiseases'
         ]
         
         # Add linkedDiseases if it exists
