@@ -194,8 +194,6 @@ class NodeIndexMapper:
         # Create therapeutic area list from disease data
         therapeutic_area_list = []
         if isinstance(disease_df, pd.DataFrame) and 'therapeuticAreas' in disease_df.columns:
-            print("Extracting therapeutic areas from DataFrame...")
-            print(f"Sample therapeuticAreas: {disease_df['therapeuticAreas'].head()}")
             for areas in disease_df['therapeuticAreas'].dropna():
                 if isinstance(areas, str):
                     try:
