@@ -21,6 +21,10 @@ class MoleculeFilter:
     def filter_linked_molecules(self, molecule_df, indication_df, known_drugs_df=None):
         """Filter molecules to only include those with validated connections."""
         print("Filtering molecules with validated connections...")
+        # First, remove molecules with parent IDs (keep only parent molecules)
+        if "parentId" in molecule_df.columns:
+            molecule_df = molecule_df[pd.isna(molecule_df["parentId"])].copy()
+
         
         # Get molecules from indications
         indication_molecules = set()
