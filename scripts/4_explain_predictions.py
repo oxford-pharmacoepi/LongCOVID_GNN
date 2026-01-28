@@ -32,9 +32,9 @@ warnings.filterwarnings('ignore')
 
 # Import from shared modules
 from src.models import GCNModel, TransformerModel, SAGEModel, MODEL_CLASSES
-from src.utils import set_seed, enable_full_reproducibility
+from src.utils.common import set_seed, enable_full_reproducibility
 from src.config import get_config, create_custom_config
-from src.mlflow_tracker import ExperimentTracker
+from src.training.tracker import ExperimentTracker
 
 
 def find_latest_graph(results_dir='results'):
@@ -861,35 +861,93 @@ def save_results(results, output_dir):
 
 
 def create_node_type_mapping(graph):
-    """Create a basic node type mapping based on node indices."""
-    # This is a simplified mapping - in practice you'd use actual mappings
+    """Create node type mapping based on graph metadata or heuristics."""
     idx_to_type = {}
-    
-    # Basic heuristic based on node indices
     num_nodes = graph.x.size(0)
     
-    # Assume first 1000 nodes are drugs
-    for i in range(min(1000, num_nodes)):
+    # Try to use metadata from graph construction (best method)
+    if hasattr(graph, 'metadata') and isinstance(graph.metadata, dict):
+        node_info = graph.metadata.get('node_info')
+        if node_info:
+            print("\nCreating node type mapping from graph metadata...")
+            current_idx = 0
+            
+            # The order MUST match the concatenation order in src/features/node.py
+            # 1. Drugs
+            # 2. Drug Types
+            # 3. Genes
+            # 4. Reactome Pathways
+            # 5. Diseases
+            # 6. Therapeutic Areas
+            
+            # Map builder keys to display names
+            type_mapping_order = [
+                ("Drugs", "Drug"),
+                ("Drug_Types", "DrugType"),
+                ("Genes", "Gene"),
+                ("Reactome_Pathways", "Pathway"),
+                ("Diseases", "Disease"),
+                ("Therapeutic_Areas", "TherapeuticArea")
+            ]
+            
+            for meta_key, display_name in type_mapping_order:
+                count = node_info.get(meta_key, 0)
+                if count > 0:
+                    for i in range(current_idx, current_idx + count):
+                        idx_to_type[i] = display_name
+                    print(f"  Mapped {count} nodes to {display_name} (indices {current_idx}-{current_idx + count - 1})")
+                    current_idx += count
+            
+            # If we covered all nodes, return
+            if len(idx_to_type) == num_nodes:
+                return idx_to_type
+            else:
+                print(f"  Warning: Metadata accounted for {len(idx_to_type)} nodes, but graph has {num_nodes}")
+
+    # Fallback to heuristics if metadata is missing or incomplete
+    print("Warning: Graph metadata missing or incomplete, using heuristics for node types (may be inaccurate)")
+    
+    # Heuristic based on typical counts if we can't find metadata
+    # This is a best-effort guess and likely incorrect for custom datasets
+    
+    current_idx = 0
+    
+    # Assume typical counts from baseline if not known
+    # Drugs (~2500)
+    drug_end = min(2500, num_nodes)
+    for i in range(current_idx, drug_end):
         idx_to_type[i] = "Drug"
+    current_idx = drug_end
     
-    # Next 100 are drug types
-    for i in range(1000, min(1100, num_nodes)):
+    # Drug Types (~10)
+    dt_end = min(current_idx + 100, num_nodes)
+    for i in range(current_idx, dt_end):
         idx_to_type[i] = "DrugType"
+    current_idx = dt_end
     
-    # Next 3000 are genes
-    for i in range(1100, min(4100, num_nodes)):
+    # Genes (~60000)
+    gene_end = min(current_idx + 61000, num_nodes) 
+    for i in range(current_idx, gene_end):
         idx_to_type[i] = "Gene"
+    current_idx = gene_end
     
-    # Next 500 are pathways
-    for i in range(4100, min(4600, num_nodes)):
+    # Pathways (~2000)
+    path_end = min(current_idx + 2000, num_nodes)
+    for i in range(current_idx, path_end):
         idx_to_type[i] = "Pathway"
+    current_idx = path_end
     
+    # Diseases (~9000)
     # Remaining are diseases and therapeutic areas
-    for i in range(4600, num_nodes):
-        if i < num_nodes - 100:
-            idx_to_type[i] = "Disease"
-        else:
-            idx_to_type[i] = "TherapeuticArea"
+    # Assume last ~200 are TAs
+    ta_count = 24
+    disease_end = max(current_idx, num_nodes - ta_count)
+    
+    for i in range(current_idx, disease_end):
+        idx_to_type[i] = "Disease"
+        
+    for i in range(disease_end, num_nodes):
+        idx_to_type[i] = "TherapeuticArea"
     
     return idx_to_type
 

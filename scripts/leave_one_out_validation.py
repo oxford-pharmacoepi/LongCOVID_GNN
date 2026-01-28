@@ -32,7 +32,7 @@ import copy
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config import get_config
-from src.utils import set_seed
+from src.utils.common import set_seed
 from src.models import GCNModel, SAGEModel, TransformerModel, MODEL_CLASSES
 from sklearn.metrics import average_precision_score, roc_auc_score, precision_recall_curve
 

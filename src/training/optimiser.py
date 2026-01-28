@@ -22,8 +22,9 @@ from typing import Dict, Any, Optional, Callable
 import numpy as np
 
 from src.models import GCNModel, TransformerModel, SAGEModel, MODEL_CLASSES
-from src.utils import enable_full_reproducibility, calculate_metrics
-from src.mlflow_tracker import ExperimentTracker
+from src.utils.common import enable_full_reproducibility
+from src.utils.eval_utils import calculate_metrics
+from src.training.tracker import ExperimentTracker
 
 
 class BayesianOptimiser:

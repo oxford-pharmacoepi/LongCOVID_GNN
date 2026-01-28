@@ -31,8 +31,8 @@ import glob
 sys.path.append(str(Path(__file__).parent.parent))
 
 from src.config import get_config, create_custom_config
-from src.bayesian_optimiser import BayesianOptimiser
-from src.utils import enable_full_reproducibility
+from src.training.optimiser import BayesianOptimiser
+from src.utils.common import enable_full_reproducibility
 
 
 def find_latest_graph(results_dir='results'):

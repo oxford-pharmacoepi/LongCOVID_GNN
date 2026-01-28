@@ -40,7 +40,7 @@ import urllib.error
 # Add src to path
 sys.path.append(str(Path(__file__).parent))
 from src.models import GCNModel, TransformerModel, SAGEModel, MODEL_CLASSES
-from src.utils import set_seed, enable_full_reproducibility
+from src.utils.common import set_seed, enable_full_reproducibility
 from src.config import get_config
 
 

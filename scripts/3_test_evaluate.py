@@ -28,8 +28,9 @@ import glob
 # Import from shared modules
 from src.models import GCNModel, TransformerModel, SAGEModel, MODEL_CLASSES
 from src.config import get_config
-from src.utils import enable_full_reproducibility, calculate_metrics
-from src.mlflow_tracker import ExperimentTracker
+from src.utils.common import enable_full_reproducibility
+from src.utils.eval_utils import calculate_metrics
+from src.training.tracker import ExperimentTracker
 
 def find_latest_graph(results_dir='results'):
     """Auto-detect the latest graph file."""

@@ -22,9 +22,11 @@ import glob
 
 # Import from shared modules
 from src.models import GCNModel, TransformerModel, SAGEModel, MODEL_CLASSES
-from src.utils import set_seed, enable_full_reproducibility, calculate_metrics, generate_pairs
+from src.utils.common import set_seed, enable_full_reproducibility
+from src.utils.eval_utils import calculate_metrics
+from src.utils.edge_utils import generate_pairs
 from src.config import get_config, create_custom_config
-from src.mlflow_tracker import ExperimentTracker
+from src.training.tracker import ExperimentTracker
 
 
 def find_latest_graph(results_dir='results'):
@@ -219,7 +221,7 @@ class ModelTrainer:
         )
         
         # Get loss function from config
-        from src.custom_losses import get_loss_function
+        from src.training.losses import get_loss_function
         loss_config = self.config.get_loss_config()
         loss_function = get_loss_function(
             loss_type=loss_config['loss_function'],
