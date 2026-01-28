@@ -220,7 +220,7 @@ class NodeIndexMapper:
             'gene_key_mapping': gene_key_mapping,
             'reactome_key_mapping': reactome_key_mapping,
             'disease_key_mapping': disease_key_mapping,
-            'therapeutic_key_mapping': therapeutic_key_mapping,
+            'therapeutic_area_key_mapping': therapeutic_key_mapping,
             'approved_drugs_list': approved_drugs_list,
             'drug_type_list': drug_type_list,
             'gene_list': gene_list,
