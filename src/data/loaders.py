@@ -56,7 +56,8 @@ class OpenTargetsLoader:
         existing_columns = [col for col in relevant_columns if col in molecule_df.columns]
         molecule_df = molecule_df[existing_columns].copy()
         
-        return molecule_df
+        # Convert back to PyArrow Table
+        return pa.Table.from_pandas(molecule_df)
     
     def load_disease_data(self, path):
         """Load and preprocess disease data."""
@@ -108,7 +109,8 @@ class OpenTargetsLoader:
                 
                 disease_df = disease_df[~disease_df['therapeuticAreas'].apply(has_excluded_area)].copy()
         
-        return disease_df
+        # Convert back to PyArrow Table
+        return pa.Table.from_pandas(disease_df)
     
     def load_gene_data(self, path, version):
         """Load and preprocess gene/target data."""
