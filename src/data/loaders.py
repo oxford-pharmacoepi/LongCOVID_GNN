@@ -82,14 +82,28 @@ class OpenTargetsLoader:
             
             if 'therapeuticAreas' in disease_df.columns:
                 def has_excluded_area(areas):
-                    if pd.isna(areas) or not areas:
+                    # Handle None/NaN
+                    if areas is None:
                         return False
+                    try:
+                        if pd.isna(areas):
+                            return False
+                    except (ValueError, TypeError):
+                        # areas might be an array, skip the isna check
+                        pass
+                    
+                    # Handle empty
+                    if not isinstance(areas, (list, tuple)) or len(areas) == 0:
+                        return False
+                    
+                    # Convert string to list if needed
                     if isinstance(areas, str):
                         import ast
                         try:
                             areas = ast.literal_eval(areas)
                         except:
                             return False
+                    
                     return any(area in excluded_areas for area in areas)
                 
                 disease_df = disease_df[~disease_df['therapeuticAreas'].apply(has_excluded_area)].copy()
