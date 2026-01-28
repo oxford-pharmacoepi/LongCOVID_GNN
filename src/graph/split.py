@@ -134,23 +134,53 @@ class DataSplitter:
             edge_index=all_edge_index,
             node_features=all_features
         )
-        print(f"✓ Sampled {len(all_negative_pairs)} total negatives")
-        
-        # Deduplicate if needed
-        negative_set = set(all_negative_pairs)
-        if len(all_negative_pairs) > len(negative_set):
-            all_negative_pairs = list(negative_set)
+        print(f"✓ Sampled {len(all_negative_pairs)} unique negatives")
         
         # Randomly split negatives
         random.seed(self.config.seed)
         shuffled_negatives = list(all_negative_pairs)
         random.shuffle(shuffled_negatives)
         
-        train_false_pairs = shuffled_negatives[:num_train_negatives]
-        val_false_pairs = shuffled_negatives[num_train_negatives:num_train_negatives + num_val_negatives]
-        test_false_pairs = shuffled_negatives[num_train_negatives + num_val_negatives:]
+        # Distribute negatives proportionally to maintain equal ratios across splits
+        actual_total_negatives = len(shuffled_negatives)
         
-        # Verify splits logic (simplified here, assuming external verification or keeping simple)
+        if actual_total_negatives < total_negatives_needed and actual_total_negatives > 0:
+            print(f"Warning: Only {actual_total_negatives} negatives available (target: {total_negatives_needed})")
+            print("Distributing negatives proportionally across splits...")
+            
+            # Simple proportional allocation
+            train_share = num_train_negatives / total_negatives_needed
+            val_share = num_val_negatives / total_negatives_needed
+            
+            n_train = int(actual_total_negatives * train_share)
+            n_val = int(actual_total_negatives * val_share)
+            
+            train_false_pairs = shuffled_negatives[:n_train]
+            val_false_pairs = shuffled_negatives[n_train:n_train + n_val]
+            test_false_pairs = shuffled_negatives[n_train + n_val:]
+        else:
+            # Standard exact allocation
+            train_false_pairs = shuffled_negatives[:num_train_negatives]
+            val_false_pairs = shuffled_negatives[num_train_negatives:num_train_negatives + num_val_negatives]
+            test_false_pairs = shuffled_negatives[num_train_negatives + num_val_negatives:num_train_negatives + num_val_negatives + num_test_negatives]
+            
+        # Final Summary Statistics
+        print("\n" + "="*50)
+        print("FINAL DATASET SPLIT SUMMARY")
+        print("="*50)
+        print(f"{'Split':<12} | {'Positive':<10} | {'Negative':<10} | {'Ratio':<6}")
+        print("-" * 50)
+        
+        def print_row(name, pos, neg):
+            ratio = f"1:{neg/pos:.1f}" if pos > 0 else "N/A"
+            print(f"{name:<12} | {pos:<10,} | {neg:<10,} | {ratio:<6}")
+            
+        print_row("Training", len(train_true_pairs), len(train_false_pairs))
+        print_row("Validation", len(val_true_pairs), len(val_false_pairs))
+        print_row("Test", len(test_true_pairs), len(test_false_pairs))
+        print("="*50 + "\n")
+        
+        # Verify splits logic
         self._verify_splits(train_false_pairs, val_false_pairs, test_false_pairs, all_positive_edges)
         
         # Create tensors
