@@ -34,7 +34,7 @@ class OpenTargetsLoader:
     def load_molecule_data(self, path):
         """Load and preprocess molecule data."""
         print(f"Loading molecule data from {path}")
-        molecule_table = ds.dataset(path, format='parquet').to_table()
+        molecule_table = ds.dataset(path, format='parquet', exclude_invalid_files=True).to_table()
         
         # Convert to pandas for easier manipulation
         molecule_df = molecule_table.to_pandas()
