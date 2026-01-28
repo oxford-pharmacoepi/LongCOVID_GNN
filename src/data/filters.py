@@ -43,16 +43,9 @@ class MoleculeFilter:
         metadata_molecules = set()
         if 'linkedDiseases' in molecule_df.columns:
             def has_linked_diseases(row):
-                linked = row.get('linkedDiseases')
-                if pd.isna(linked) or not linked:
-                    return False
-                if isinstance(linked, str):
-                    import ast
-                    try:
-                        linked = ast.literal_eval(linked)
-                    except:
-                        return False
-                return len(linked) > 0 if isinstance(linked, (list, dict)) else False
+                if 'linkedDiseases' in row and isinstance(row['linkedDiseases'], dict):
+                    return row['linkedDiseases'].get('count', 0) > 0
+                return False
             
             metadata_molecules = set(
                 molecule_df[molecule_df.apply(has_linked_diseases, axis=1)]['id'].unique()
