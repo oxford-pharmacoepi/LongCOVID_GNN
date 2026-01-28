@@ -86,15 +86,30 @@ class IdMapper:
     
     def safe_list_conversion(self, value):
         """Safely convert various formats to lists."""
+        # Handle None first
+        if value is None:
+            return []
+        
+        # Handle pandas NA/None - wrap in try/except for arrays
+        try:
+            if pd.isna(value):
+                return []
+        except (ValueError, TypeError):
+            # value might be an array, continue
+            pass
+        
+        # Handle strings
         if isinstance(value, str):
             try:
                 return ast.literal_eval(value)
             except:
                 return []
-        elif isinstance(value, list):
-            return value
-        elif pd.isna(value):
-            return []
+        
+        # Handle lists and tuples
+        elif isinstance(value, (list, tuple)):
+            return list(value)
+        
+        # Default
         else:
             return []
     
