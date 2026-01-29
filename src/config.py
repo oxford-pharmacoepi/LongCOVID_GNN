@@ -67,7 +67,8 @@ class Config:
             'num_epochs': 200,
             'patience': 50,
             'heads': 2,
-            'concat': True 
+            'concat': True,
+            'batch_size': 2048
         }
         
         # Training settings
