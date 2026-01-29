@@ -176,7 +176,6 @@ class OpenTargetsLoader:
         """Load known drugs aggregated data."""
         print(f"Loading knownDrugsAggregated data from {path}")
         
-        # EXACT COPY from original lines 266-280
         # Use glob pattern to only read parquet files, excluding index.html
         parquet_files = glob.glob(f"{path}/*.parquet")
         

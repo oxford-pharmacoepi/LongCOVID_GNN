@@ -15,6 +15,8 @@ dependencies = [
     "pandas>=2.3.3",
     "plotly>=6.5.0",
     "polars>=1.36.1",
+    "pytest>=8.0.0",
+    "pytest-cov>=4.1.0",
     "scikit-learn>=1.7.2",
     "scipy>=1.16.2",
     "seaborn>=0.13.2",
@@ -39,3 +41,15 @@ required-environments = [
 members = [
     "LongCOVID_GNN",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests",
+    "slow: Slow tests that may take several minutes"
+]
+addopts = "-v --strict-markers"
