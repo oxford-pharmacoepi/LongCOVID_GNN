@@ -275,15 +275,23 @@ class LongCOVIDDrugRepurposing:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {self.device}")
         
-        # Load mappings
-        self.load_mappings()
-        
         # Auto-detect or use provided paths
         if graph_path:
             self.graph_path = graph_path
             print(f"Using specified graph: {self.graph_path}")
         else:
             self.graph_path = find_latest_graph()
+        
+        # Determine mappings path based on graph path
+        graph_mappings_dir = str(self.graph_path).replace('.pt', '_mappings')
+        if os.path.isdir(graph_mappings_dir):
+            print(f"Found graph-specific mappings at: {graph_mappings_dir}")
+            self.mappings_path = Path(graph_mappings_dir)
+        else:
+            print(f"Graph-specific mappings not found. Using default: {self.mappings_path}")
+            
+        # Load mappings
+        self.load_mappings()
         
         if model_path:
             self.model_path = model_path
