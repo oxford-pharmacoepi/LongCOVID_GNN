@@ -4,7 +4,7 @@ Leave-One-Out Validation Script for Drug-Disease Prediction
 
 This script performs rigorous leave-one-out cross-validation by:
 1. Removing known drug-disease edges from the graph
-2. Optionally removing the drug or disease NODE entirely (not just edges)
+2. Optionally removing the drug or disease node entirely (not just edges)
 3. Retraining the model on the modified graph
 4. Testing if the model can recover the held-out associations
 
@@ -32,6 +32,8 @@ import copy
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config import get_config
+from src.negative_sampling import get_sampler
+from src.training.losses import get_loss_function
 from src.utils.common import set_seed
 from src.models import GCNModel, SAGEModel, TransformerModel, MODEL_CLASSES
 from sklearn.metrics import average_precision_score, roc_auc_score, precision_recall_curve
@@ -68,8 +70,11 @@ class LinkPredictor(nn.Module):
                 nn.Linear(hidden_channels, 1)
             )
     
-    def encode(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
+    def encode(self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor = None) -> torch.Tensor:
         """Get node embeddings from the encoder."""
+        # Pass edge attributes if available
+        if edge_attr is not None:
+            return self.encoder(x, edge_index, edge_attr=edge_attr)
         return self.encoder(x, edge_index)
     
     def decode(self, z: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
@@ -86,9 +91,9 @@ class LinkPredictor(nn.Module):
             return self.decoder(edge_features).squeeze(-1)
     
     def forward(self, x: torch.Tensor, edge_index: torch.Tensor, 
-                pred_edges: torch.Tensor) -> torch.Tensor:
+                pred_edges: torch.Tensor, edge_attr: torch.Tensor = None) -> torch.Tensor:
         """Full forward pass: encode then decode."""
-        z = self.encode(x, edge_index)
+        z = self.encode(x, edge_index, edge_attr=edge_attr)
         return self.decode(z, pred_edges)
 
 
@@ -153,11 +158,20 @@ class LeaveOneOutValidator:
         self.graph = torch.load(latest_graph_path, weights_only=False)
         print(f"  Graph: {self.graph.num_nodes} nodes, {self.graph.edge_index.shape[1]} edges")
         
-        # Load mappings from processed_data/mappings (JSON files)
+        # Load mappings
         processed_data_path = Path('processed_data')
-        mappings_path = processed_data_path / 'mappings'
-            
-        print(f"Loading mappings from: {mappings_path}")
+        
+        # Check if mapings exist next to the graph (preferred)
+        graph_mappings_dir = str(latest_graph_path).replace('.pt', '_mappings')
+        
+        if os.path.isdir(graph_mappings_dir):
+            print(f"Loading graph-specific mappings from: {graph_mappings_dir}")
+            mappings_path = Path(graph_mappings_dir)
+        else:
+            # Fallback: Use global processed_data/mappings (risky if graph was subsetted)
+            mappings_path = processed_data_path / 'mappings'
+            print(f"Loading global mappings from: {mappings_path}")
+            print("WARNING: Global mappings may not match graph indices if nodes were filtered.")
         
         # Load JSON mappings
         import json
@@ -173,9 +187,32 @@ class LeaveOneOutValidator:
         self.idx_to_disease = {v: k for k, v in self.disease_key_mapping.items()}
         self.idx_to_gene = {v: k for k, v in self.gene_key_mapping.items()}
         
-        # Load drug-disease edges from processed_data/edges
-        edges_path = processed_data_path / 'edges'
-        self.drug_disease_edges = torch.load(edges_path / '2_molecule_disease_edges.pt', weights_only=False)
+        # Extract drug-disease edges from graph itself
+        print("  Extracting drug-disease edges from graph...")
+        
+        # Create masks for efficient filtering
+        num_nodes = self.graph.num_nodes
+        is_drug = torch.zeros(num_nodes, dtype=torch.bool)
+        is_disease = torch.zeros(num_nodes, dtype=torch.bool)
+        
+        # Mark drug and disease nodes
+        # Note: We use the values from mappings which are guaranteed to match the graph indices
+        drug_indices = list(self.drug_key_mapping.values())
+        disease_indices = list(self.disease_key_mapping.values())
+        
+        is_drug[drug_indices] = True
+        is_disease[disease_indices] = True
+        
+        # Check edges
+        edge_index = self.graph.edge_index
+        src, dst = edge_index[0], edge_index[1]
+        
+        # Find edges where (Src is Drug and Dst is Disease)
+        mask = is_drug[src] & is_disease[dst]
+        
+        filtered_edges = edge_index[:, mask]
+        self.drug_disease_edges = filtered_edges
+        
         print(f"  Drug-disease edges: {self.drug_disease_edges.shape[1]}")
         
         # Get unique drugs and diseases with connections
@@ -274,21 +311,51 @@ class LeaveOneOutValidator:
         
         return modified_graph, idx_mapping
     
-    def create_model(self, in_channels: int, hidden_channels: int = 128) -> torch.nn.Module:
-        """Create a fresh model instance with link prediction capability."""
+    def create_model(self, in_channels: int, hidden_channels: int = None) -> torch.nn.Module:
+        """Create a fresh model instance with link prediction capability using Config."""
         model_choice = self.config.model_choice
+        model_config = self.config.model_config
+        
+        # Use config hidden_channels if not overridden
+        if hidden_channels is None:
+            hidden_channels = model_config.get('hidden_channels', 64)
         
         # Get the encoder model class
         ModelClass = MODEL_CLASSES.get(model_choice, TransformerModel)
         
-        # Create encoder (output embedding dimension = hidden_channels)
-        encoder = ModelClass(
-            in_channels=in_channels, 
-            hidden_channels=hidden_channels, 
-            out_channels=hidden_channels,  # Output embeddings
-            num_layers=2,
-            dropout_rate=0.3
-        )
+        # Standardise args from config
+        kwargs = {
+            'in_channels': in_channels, 
+            'hidden_channels': hidden_channels, 
+            'out_channels': model_config.get('out_channels', 32),
+            'num_layers': model_config.get('num_layers', 2),
+            'dropout_rate': model_config.get('dropout_rate', 0.5)
+        }
+        
+        # Add model-specific args
+        if model_choice in ['Transformer', 'TransformerModel']:
+            kwargs['heads'] = model_config.get('heads', 2)
+            kwargs['concat'] = model_config.get('concat', True)
+            
+            # Check for edge features
+            if hasattr(self, 'graph') and hasattr(self.graph, 'edge_attr') and self.graph.edge_attr is not None:
+                kwargs['edge_dim'] = self.graph.edge_attr.size(1)
+        
+        # Create encoder
+        # Explicit initialisation for Transformer to ensure edge_dim is passed correctly
+        if ModelClass.__name__ == 'TransformerModel':
+             encoder = TransformerModel(
+                 in_channels=kwargs['in_channels'],
+                 hidden_channels=kwargs['hidden_channels'],
+                 out_channels=kwargs['out_channels'],
+                 num_layers=kwargs['num_layers'],
+                 dropout_rate=kwargs['dropout_rate'],
+                 heads=kwargs.get('heads', 4),
+                 concat=kwargs.get('concat', False),
+                 edge_dim=kwargs.get('edge_dim')
+             )
+        else:
+             encoder = ModelClass(**kwargs)
         
         # Wrap with link predictor
         model = LinkPredictor(encoder, hidden_channels=hidden_channels, decoder_type='dot')
@@ -297,27 +364,46 @@ class LeaveOneOutValidator:
     
     def train_model(self, model: torch.nn.Module, graph: torch.Tensor, 
                     train_edges: torch.Tensor, train_labels: torch.Tensor) -> torch.nn.Module:
-        """Train model on the modified graph."""
+        """Train model on the modified graph using Config settings."""
         model.train()
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)
+        
+        # Optimiser from config
+        lr = self.config.model_config.get('learning_rate', 0.001)
+        weight_decay = self.config.model_config.get('weight_decay', 1e-5)
+        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+        
+        # Loss from config
+        loss_config = self.config.get_loss_config()
+        try:
+            criterion = get_loss_function(loss_config['loss_function'], **loss_config['params'])
+            print(f"  Using loss function: {loss_config['loss_function']}")
+        except Exception as e:
+            print(f"  Warning: Failed to load custom loss {loss_config['loss_function']} ({e}). Using standard BCE.")
+            criterion = torch.nn.BCEWithLogitsLoss()
         
         graph = graph.to(self.device)
         train_edges = train_edges.to(self.device)
         train_labels = train_labels.to(self.device)
         
-        for epoch in range(self.epochs_per_fold):
+        print(f"  Training on {train_edges.shape[1]} edges (Positive: {torch.sum(train_labels==1)}, Negative: {torch.sum(train_labels==0)})")
+        
+        pbar = tqdm(range(self.epochs_per_fold), desc="Training", leave=False)
+        for epoch in pbar:
             optimizer.zero_grad()
             
             # Forward pass
-            z = model.encode(graph.x, graph.edge_index)
+            edge_attr = getattr(graph, 'edge_attr', None)
+            z = model.encode(graph.x, graph.edge_index, edge_attr=edge_attr)
             pred = model.decode(z, train_edges)
             
             # Loss
-            loss = F.binary_cross_entropy_with_logits(pred, train_labels.float())
+            loss = criterion(pred, train_labels.float())
             
             # Backward pass
             loss.backward()
             optimizer.step()
+            
+            pbar.set_postfix({'loss': f"{loss.item():.4f}"})
         
         return model
     
@@ -622,7 +708,58 @@ class LeaveOneOutValidator:
         
         return output_path
 
-    def validate_specific_node(self, target_node_name: str, k: int = 20):
+    def validate_top_diseases(self, n: int = 5, k: int = 20):
+        """
+        Run validation on the top N diseases with the most known drugs.
+        This provides a representative 'Global' validation score without the
+        computational cost of full Leave-One-Out.
+        """
+        self.load_graph_data()
+        
+        # Count connections for each disease
+        disease_counts = {}
+        for i in range(self.drug_disease_edges.shape[1]):
+            disease_idx = self.drug_disease_edges[1, i].item()
+            disease_counts[disease_idx] = disease_counts.get(disease_idx, 0) + 1
+            
+        # Sort by count
+        sorted_diseases = sorted(disease_counts.items(), key=lambda x: x[1], reverse=True)
+        top_n = sorted_diseases[:n]
+        
+        print(f"\n{'='*80}")
+        print(f"VALIDATING TOP {n} DISEASES (by connected drug count)")
+        print(f"{'='*80}\n")
+        
+        metrics = []
+        
+        for i, (disease_idx, count) in enumerate(top_n):
+            disease_id = self.idx_to_disease.get(disease_idx, f"Unknown_{disease_idx}")
+            print(f"\n[{i+1}/{n}] Validating {disease_id} ({count} known drugs)...")
+            
+            # Use the existing single-node validation method
+            # Note: We need to adapt it slightly to return metrics instead of just printing
+            metric = self.validate_specific_node(disease_id, k=k, return_metrics=True)
+            if metric:
+                 metric['disease_id'] = disease_id
+                 metrics.append(metric)
+        
+        if not metrics:
+            print("No metrics collected.")
+            return
+
+        # Calculate average metrics
+        avg_hits = np.mean([m['hits'] for m in metrics])
+        avg_mean_rank = np.mean([m['mean_rank'] for m in metrics])
+        avg_median_rank = np.mean([m['median_rank'] for m in metrics])
+        
+        print(f"\n{'='*80}")
+        print(f"SUMMARY FOR TOP {n} DISEASES")
+        print(f"{'='*80}")
+        print(f"Average Hits@{k}: {avg_hits:.1f}")
+        print(f"Average Mean Rank: {avg_mean_rank:.1f}")
+        print(f"Average Median Rank: {avg_median_rank:.1f}")
+        
+    def validate_specific_node(self, target_node_name: str, k: int = 20, return_metrics: bool = False):
         """
         Validate ability to recover drug-disease edges for a specific disease.
         
@@ -634,7 +771,8 @@ class LeaveOneOutValidator:
             target_node_name: Name of disease to test (e.g. 'EFO_0003854')
             k: Top k predictions to show
         """
-        self.load_graph_data()
+        if not hasattr(self, 'graph'):
+            self.load_graph_data()
         
         # 1. Find node index
         target_cur = target_node_name.lower().strip()
@@ -661,7 +799,7 @@ class LeaveOneOutValidator:
                     
         if node_idx is None:
             print(f"Error: Node '{target_node_name}' not found in mappings.")
-            return
+            return None
             
         print(f"\nAnalysing target node: {true_name} (ID: {node_idx}, Type: {node_type})")
         
@@ -680,7 +818,7 @@ class LeaveOneOutValidator:
         
         if len(true_drug_neighbors) == 0:
             print("Warning: No drug-disease edges found for this node.")
-            return
+            return None
         
         # 3. Create Training Graph - Remove ONLY the drug-disease edges for this node
         print("Creating training graph (removing drug-disease edges only, keeping disease node)...")
@@ -715,17 +853,67 @@ class LeaveOneOutValidator:
             else:
                 removed_count += 1
         
+        # Update edge attributes (if present) to match filtered edges
+        if hasattr(train_graph, 'edge_attr') and train_graph.edge_attr is not None:
+            train_graph.edge_attr = train_graph.edge_attr[edges_to_keep]
+            
+        if hasattr(train_graph, 'edge_type') and train_graph.edge_type is not None:
+            train_graph.edge_type = train_graph.edge_type[edges_to_keep]
+            
         train_graph.edge_index = edge_index[:, edges_to_keep]
         print(f"Training graph: {train_graph.num_nodes} nodes, {train_graph.edge_index.shape[1]} edges")
         print(f"Removed {removed_count} edges (disease node kept with other connections)")
         
         # 4. Train Model
+        # 4. Train Model
         print(f"Training model on modified graph...")
-        train_pos_edges = train_graph.edge_index
         
-        # Add negative samples
-        num_neg = min(train_pos_edges.shape[1], 50000)  # Limit negatives for speed
-        neg_edges = torch.randint(0, train_graph.num_nodes, (2, num_neg))
+        # Train only on known drug-disease edges (minus the held out ones)
+        
+        # Filter global drug-disease edges to exclude the held-out ones
+        src_dd = self.drug_disease_edges[0]
+        dst_dd = self.drug_disease_edges[1]
+        
+        # Keep edges where neither source nor dest is the target node
+        keep_mask = (src_dd != node_idx) & (dst_dd != node_idx)
+        train_pos_edges = self.drug_disease_edges[:, keep_mask]
+        
+        print(f"Defining training set: {train_pos_edges.shape[1]} drug-disease edges (excluding target connections)")
+        
+        # Add negative samples using config sampler: matches standard training
+        neg_config = self.config.get_negative_sampling_config()
+        strategy = neg_config['strategy']
+        params = neg_config['params']
+        neg_ratio = neg_config['train_neg_ratio']
+        
+        num_neg = train_pos_edges.shape[1] * neg_ratio
+        print(f"Sampling negatives using '{strategy}' strategy (Ratio 1:{neg_ratio}, Target: {num_neg})...")
+        
+        # Prepare data for sampler
+        # 1. Positive edges set
+        pos_edges_list = train_pos_edges.t().tolist()
+        pos_edges_set = set((r[0], r[1]) for r in pos_edges_list)
+        
+        # 2. All possible pairs (Drug x Disease)
+        drug_indices = list(self.drug_key_mapping.values())
+        disease_indices = list(self.disease_key_mapping.values())
+        
+        # Use itertools to generate pairs lazily if sampler supported it, but it expects list
+        import itertools
+        all_possible_pairs = list(itertools.product(drug_indices, disease_indices))
+        
+        # 3. Init and Run Sampler
+        sampler = get_sampler(strategy, **params)
+        
+        neg_samples_list = sampler.sample(
+            positive_edges=pos_edges_set,
+            all_possible_pairs=all_possible_pairs,
+            num_samples=num_neg,
+            edge_index=train_graph.edge_index, # Use full graph structure for structural sampling
+            node_features=train_graph.x
+        )
+        
+        neg_edges = torch.tensor(neg_samples_list, dtype=torch.long).t()
         
         train_edges = torch.cat([train_pos_edges, neg_edges], dim=1)
         train_labels = torch.cat([torch.ones(train_pos_edges.shape[1]), torch.zeros(num_neg)])
@@ -733,7 +921,7 @@ class LeaveOneOutValidator:
         model = self.create_model(train_graph.x.shape[1])
         model = self.train_model(model, train_graph, train_edges, train_labels)
         
-        # 5. Inference - Predict drug-disease links
+        # 5. Inference:  Predict drug-disease links
         print("Running inference (ranking drugs for target disease)...")
         model.eval()
         
@@ -741,59 +929,72 @@ class LeaveOneOutValidator:
         inf_graph = train_graph.to(self.device)
         
         with torch.no_grad():
-            z = model.encode(inf_graph.x, inf_graph.edge_index)
+            edge_attr = getattr(inf_graph, 'edge_attr', None)
+            z = model.encode(inf_graph.x, inf_graph.edge_index, edge_attr=edge_attr)
             z_target = z[node_idx]  # Embedding of target disease
             
             # Get all drug node indices
             drug_indices = list(self.drug_key_mapping.values())
             
             # Score ONLY against drug nodes
-            drug_scores = {}
+            drug_results = []
             for drug_idx in drug_indices:
                 z_drug = z[drug_idx]
                 score = (z_target * z_drug).sum().item()  # Dot product
-                drug_scores[drug_idx] = score
+                prob = torch.sigmoid(torch.tensor(score)).item()
+                drug_results.append((drug_idx, score, prob))
             
             # Sort by score
-            sorted_drugs = sorted(drug_scores.items(), key=lambda x: x[1], reverse=True)
+            sorted_drugs = sorted(drug_results, key=lambda x: x[1], reverse=True)
             
             print(f"\nTop {k} Drug Predictions for {true_name}:")
-            print(f"{'Rank':<5} {'Score':<10} {'Drug ID':<20} {'Is True Connection?'}")
-            print("-" * 80)
+            print(f"{'Rank':<5} {'Score':<10} {'Prob':<10} {'Drug ID':<20} {'Is True Connection?'}")
+            print("-" * 90)
             
             hits = 0
-            for rank, (drug_idx, score) in enumerate(sorted_drugs[:k], 1):
+            for rank, (drug_idx, score, prob) in enumerate(sorted_drugs[:k], 1):
                 drug_id = self.idx_to_drug.get(drug_idx, "Unknown")
                 is_true = drug_idx in true_drug_neighbors
                 mark = "✓ YES (RECOVERED)" if is_true else ""
                 if is_true:
                     hits += 1
                 
-                print(f"{rank:<5} {score:<10.4f} {drug_id:<20} {mark}")
+                print(f"{rank:<5} {score:<10.4f} {prob:<10.4f} {drug_id:<20} {mark}")
             
             # Calculate ranks for all true neighbors
             print(f"\nAnalysis of True Drug Connections (Total: {len(true_drug_neighbors)}):")
+            print(f"{'Drug ID':<20} {'Rank':<8} {'Score':<10} {'Prob':<10}")
+            print("-" * 60)
+            
             ranks = []
+            # Helper map for fast lookup
+            rank_map = {d: (r, s, p) for r, (d, s, p) in enumerate(sorted_drugs, 1)}
+            
             for drug_idx in true_drug_neighbors:
-                # Find rank of this drug
-                rank = next((i for i, (d, s) in enumerate(sorted_drugs, 1) if d == drug_idx), len(sorted_drugs) + 1)
-                ranks.append(rank)
-                
-                if rank > k:
+                if drug_idx in rank_map:
+                    rank, score, prob = rank_map[drug_idx]
+                    ranks.append(rank)
                     drug_id = self.idx_to_drug.get(drug_idx, "Unknown")
-                    score = drug_scores.get(drug_idx, 0)
-                    print(f"  {drug_id}: Rank {rank}, Score {score:.4f}")
+                    print(f"{drug_id:<20} {rank:<8} {score:<10.4f} {prob:<10.4f}")
+                else:
+                    # Should not happen if all drugs are scored
+                    ranks.append(len(sorted_drugs) + 1)
             
             ranks = np.array(ranks)
+            mean_rank = np.mean(ranks) if len(ranks) > 0 else 0
+            median_rank = np.median(ranks) if len(ranks) > 0 else 0
+            
             print(f"\nMetrics:")
             print(f"  Hits@{k}: {hits} / {len(true_drug_neighbors)}")
-            print(f"  Median Rank: {np.median(ranks):.1f}")
-            print(f"  Mean Rank: {np.mean(ranks):.2f}")
-            print(f"  Min Rank: {np.min(ranks) if len(ranks) > 0 else 'N/A'}")
-            print(f"  Max Rank: {np.max(ranks) if len(ranks) > 0 else 'N/A'}")
-
-
-
+            print(f"  Median Rank: {median_rank:.1f}")
+            print(f"  Mean Rank: {mean_rank:.2f}")
+            
+            if return_metrics:
+                return {
+                    'hits': hits,
+                    'mean_rank': mean_rank,
+                    'median_rank': median_rank
+                }
 
 def main():
     parser = argparse.ArgumentParser(description='Leave-One-Out Validation for Drug Repurposing')
@@ -809,15 +1010,17 @@ def main():
                        help='Number of folds to run (None = all)')
     parser.add_argument('--sample-size', type=int, default=None,
                        help='Number of edges to sample for validation')
-    parser.add_argument('--epochs', type=int, default=50,
-                       help='Training epochs per fold')
+    parser.add_argument('--epochs', type=int, default=None,
+                       help='Training epochs per fold (default: from config)')
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed')
     parser.add_argument('--model', type=str, default='TransformerModel',
                        choices=['GCN', 'SAGE', 'Transformer', 'GCNModel', 'SAGEModel', 'TransformerModel'],
                        help='Model to use')
     parser.add_argument('--target-node', type=str, default=None,
-                       help='Specific node to validate (e.g., "EFO_0003854", which is postmenopausal osteoporosis). Performance test for recovering its edges.')
+                       help='Specific node to validate (e.g. "EFO_0003854").')
+    parser.add_argument('--top-diseases', type=int, default=0,
+                        help='Number of top diseases (by connections) to validate automatically. Defaults to 5 if no target specified and no global options set.')
     
     args = parser.parse_args()
     
@@ -827,6 +1030,13 @@ def main():
     # Get config
     config = get_config()
     config.model_choice = args.model
+    
+    # Set epochs from config if not provided
+    if args.epochs is None:
+        args.epochs = config.model_config.get('num_epochs', 50)
+        print(f"Using config epochs: {args.epochs}")
+    else:
+        print(f"Using CLI epochs: {args.epochs}")
     
     # Auto-detect graph if not provided
     if args.graph is None:
@@ -847,11 +1057,25 @@ def main():
     validator.graph_path = args.graph
     
     if args.target_node:
-        # Run specific node validation
+        # 1. Run specific node validation
         validator.validate_specific_node(args.target_node)
-        return {}
+        
+    elif args.top_diseases > 0:
+        # 2. Run top N diseases validation
+        validator.validate_top_diseases(n=args.top_diseases)
+        
+    elif not args.sample_size and not args.num_folds:
+        # 3. Default behavior if no arguments: Validate top 5 diseases
+        print("\nNo specific validation arguments provided.")
+        print("Defaulting to: Validate Top 5 Diseases (Recommended for quick check)")
+        validator.validate_top_diseases(n=5)
+        
     else:
-        # Run standard validation
+        # 4. Run edge-based LOO
+        print("\nWARNING: Running edge-by-edge Leave-One-Out validation.")
+        print("This is computationally expensive (approx 1 min per edge).")
+        input("Press Enter to continue or Ctrl+C to cancel...")
+        
         results = validator.run_validation(sample_size=args.sample_size)
         
         # Save results
@@ -861,9 +1085,6 @@ def main():
         print("VALIDATION COMPLETE")
         print("="*80)
         print(f"\nPrimary Metric (APR): {results.get('mean_apr', results.get('apr', 'N/A')):.4f}")
-        
-        return results
-
 
 if __name__ == "__main__":
     main()
