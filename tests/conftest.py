@@ -70,7 +70,6 @@ def test_config(temp_dir):
         'use_disease_similarity': True,
         'disease_similarity_max_children': 10,
         'disease_similarity_min_shared': 1,
-        'reactome_network': False,
         'trial_edges': True
     }
     return config

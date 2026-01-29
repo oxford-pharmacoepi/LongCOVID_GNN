@@ -57,7 +57,7 @@ class DataSplitter:
         
         Args:
             drug_disease_edges: Tensor of drug-disease edges [2, num_edges]
-            all_edge_index: Tensor of ALL edges in the graph (for negative sampling context)
+            all_edge_index: Tensor of all edges in the graph (for negative sampling context)
             all_features: Feature matrix for all nodes
             mappings: Node mappings dict
             
@@ -122,10 +122,10 @@ class DataSplitter:
         print(f"  Test: {num_test_negatives} (1:{self.config.pos_neg_ratio} ratio)")
         print(f"  TOTAL: {total_negatives_needed}")
         
-        # Sample ALL negatives at once
+        # Sample all negatives at once
         all_positive_edges = train_edges_set | new_val_edges_set | new_test_edges_set
         
-        print(f"\nSampling ALL {total_negatives_needed} negatives at once...")
+        print(f"\nSampling all {total_negatives_needed} negatives at once...")
         sampler = self._create_sampler(future_positives=new_val_edges_set | new_test_edges_set)
         all_negative_pairs = sampler.sample(
             positive_edges=all_positive_edges,

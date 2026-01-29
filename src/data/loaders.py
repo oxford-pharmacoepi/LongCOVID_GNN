@@ -24,8 +24,7 @@ class OpenTargetsLoader:
         """Load and preprocess indication data."""
         print(f"Loading indication data from {path}")
         
-        # EXACT COPY from original lines 119-132
-        # Use glob pattern to only read parquet files, excluding index.html
+        # Use glob pattern to read parquet files only
         parquet_files = glob.glob(f"{path}/*.parquet")
         
         if not parquet_files:
@@ -44,8 +43,7 @@ class OpenTargetsLoader:
         """Load and preprocess molecule data."""
         print(f"Loading molecule data from {path}")
         
-        # EXACT COPY from original lines 139-163
-        # Use glob pattern to only read parquet files, excluding index.html
+        # Use glob pattern to read parquet files only
         parquet_files = glob.glob(f"{path}/*.parquet")
         
         if not parquet_files:
@@ -75,8 +73,7 @@ class OpenTargetsLoader:
         """Load and preprocess disease data."""
         print(f"Loading disease data from {path}")
         
-        # EXACT COPY from original lines 170-216
-        # Use glob pattern to only read parquet files, excluding index.html
+        # Use glob pattern to read parquet files only
         parquet_files = glob.glob(f"{path}/*.parquet")
         
         if not parquet_files:
@@ -128,8 +125,7 @@ class OpenTargetsLoader:
         """Load and preprocess gene/target data."""
         print(f"Loading gene data from {path}")
         
-        # EXACT COPY from original lines 223-242
-        # Use glob pattern to only read parquet files, excluding index.html
+        # Use glob pattern to read parquet files only
         parquet_files = glob.glob(f"{path}/*.parquet")
         
         if not parquet_files:
@@ -154,8 +150,7 @@ class OpenTargetsLoader:
         """Load and preprocess associations data."""
         print(f"Loading associations data from {path}")
         
-        # EXACT COPY from original lines 245-263
-        # Use glob pattern to only read parquet files, excluding index.html
+        # Use glob pattern to read parquet files only
         parquet_files = glob.glob(f"{path}/*.parquet")
         
         if not parquet_files:
@@ -195,8 +190,7 @@ class OpenTargetsLoader:
         """Load mechanism of action data."""
         print(f"Loading mechanism of action data from {path}")
         
-        # EXACT COPY from original lines 283-296
-        # Use glob pattern to only read parquet files, excluding index.html
+        # Use glob pattern to read parquet files only
         parquet_files = glob.glob(f"{path}/*.parquet")
         
         if not parquet_files:

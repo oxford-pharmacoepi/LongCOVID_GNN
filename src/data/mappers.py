@@ -172,7 +172,7 @@ class NodeIndexMapper:
             disease_list = disease_df.column('id').to_pylist()
         
         print(f"Diseases (core set with approved drugs): {len(disease_list)}")
-        print("Note: Ancestor diseases will be used for similarity edges but NOT added as nodes")
+        print("Note: Ancestor diseases will be used for similarity edges but not added as nodes")
         
         # Create reactome pathway list from gene data
         reactome_list = []
