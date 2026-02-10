@@ -25,8 +25,8 @@ def boolean_encode(boolean_array, pad_length):
     return padded_tensor
 
 
-def normalize(array, pad_length):
-    """Normalize arrays with padding."""
+def normalise(array, pad_length):
+    """Normalise arrays with padding."""
     df = array.to_pandas().to_numpy().reshape(-1, 1)
     df = pd.DataFrame(df)
     df.fillna(-1, inplace=True)

@@ -39,7 +39,8 @@ import urllib.error
 
 # Add src to path
 sys.path.append(str(Path(__file__).parent))
-from src.models import GCNModel, TransformerModel, SAGEModel, MODEL_CLASSES
+from src.models import GCNModel, TransformerModel, SAGEModel, MODEL_CLASSES, LinkPredictor
+from src.features.heuristic_scores import compute_heuristic_edge_features
 from src.utils.common import set_seed, enable_full_reproducibility
 from src.config import get_config
 
@@ -540,35 +541,44 @@ class LongCOVIDDrugRepurposing:
             edge_dim = self.graph.edge_attr.size(1)
             
             # For TransformerModel, pass edge_dim to constructor
+            # For TransformerModel, pass edge_dim to constructor
             if model_name == 'Transformer':
-                self.model = model_class(
+                encoder_instance = model_class(
                     in_channels=self.graph.x.shape[1],
                     hidden_channels=model_config['hidden_channels'],
                     out_channels=model_config['out_channels'],
                     num_layers=model_config['num_layers'],
                     dropout_rate=model_config['dropout_rate'],
                     edge_dim=edge_dim
-                ).to(self.device)
+                )
             else:
                 # For other models, pass edge_dim if they support it
-                self.model = model_class(
+                encoder_instance = model_class(
                     in_channels=self.graph.x.shape[1],
                     hidden_channels=model_config['hidden_channels'],
                     out_channels=model_config['out_channels'],
                     num_layers=model_config['num_layers'],
                     dropout_rate=model_config['dropout_rate'],
                     edge_dim=edge_dim
-                ).to(self.device)
+                )
         else:
             print("  Note: No edge features found")
             # Initialise model without edge_dim
-            self.model = model_class(
+            encoder_instance = model_class(
                 in_channels=self.graph.x.shape[1],
                 hidden_channels=model_config['hidden_channels'],
                 out_channels=model_config['out_channels'],
                 num_layers=model_config['num_layers'],
                 dropout_rate=model_config['dropout_rate']
-            ).to(self.device)
+            )
+            
+        # Wrap encoder in LinkPredictor with learned heuristic decoder
+        print("  Wrapping encoder in LinkPredictor with learned heuristic decoder...")
+        self.model = LinkPredictor(
+            encoder=encoder_instance,
+            hidden_channels=model_config['out_channels'],
+            decoder_type='mlp_heuristic'
+        ).to(self.device)
         
         # Load weights
         checkpoint = torch.load(self.model_path, map_location=self.device, weights_only=False)
@@ -600,24 +610,32 @@ class LongCOVIDDrugRepurposing:
             print(f"\nPredicting top {top_k} drug candidates for Long COVID...")
         
         with torch.no_grad():
-            # Get node embeddings from model
-            # Pass edge features if they exist in the graph
-            if hasattr(self.graph, 'edge_attr') and self.graph.edge_attr is not None:
-                embeddings = self.model(self.graph.x, self.graph.edge_index, edge_attr=self.graph.edge_attr)
-            else:
-                embeddings = self.model(self.graph.x, self.graph.edge_index)
+            # Encode
+            embeddings = self.model.encode(self.graph.x, self.graph.edge_index, edge_attr=self.graph.edge_attr if hasattr(self.graph, 'edge_attr') else None)
             
             # Normalise embeddings (consistent with training/testing)
             embeddings = F.normalize(embeddings, p=2, dim=1)
             
-            # Get Long COVID embedding
-            long_covid_embedding = embeddings[self.long_covid_idx]
+            # Predictions: Drug <-> Long COVID
+            # Construct query edges
+            drug_indices = list(range(num_drugs))
+            lc_idx = self.long_covid_idx
             
-            # Get all drug embeddings (first N nodes are drugs)
-            drug_embeddings = embeddings[:num_drugs]
+            src = torch.tensor(drug_indices, dtype=torch.long)
+            dst = torch.tensor([lc_idx] * num_drugs, dtype=torch.long)
+            query_edges = torch.stack([src, dst])
             
-            # Calculate similarity scores (dot product, now bounded to [-1, 1])
-            scores = torch.matmul(drug_embeddings, long_covid_embedding)
+            # Compute Heuristics for these new edges
+            print("  Computing heuristic features for candidates (this may take a moment)...")
+            graph_cpu = self.graph.cpu()
+            query_edges_cpu = query_edges
+            inf_heuristics = compute_heuristic_edge_features(graph_cpu, query_edges_cpu)
+            inf_heuristics = inf_heuristics.to(self.device)
+            
+            query_edges = query_edges.to(self.device)
+            
+            # Decode using LinkPredictor (handles heuristics + boosting)
+            scores = self.model.decode(embeddings, query_edges, heuristic_features=inf_heuristics)
             
             probabilities = torch.sigmoid(scores)            
             # Store for later use (for visualisations)

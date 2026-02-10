@@ -185,6 +185,25 @@ class OpenTargetsLoader:
         print(f"Loaded {len(known_drugs_df)} known drug records with clinical phase info")
         
         return known_drugs_df
+
+    def load_drug_warnings(self, path):
+        """Load and preprocess drug warnings data."""
+        print(f"Loading drug warnings data from {path}")
+        
+        # Use glob pattern to read parquet files only
+        parquet_files = glob.glob(f"{path}/*.parquet")
+        
+        if not parquet_files:
+            raise FileNotFoundError(f"No parquet files found in {path}")
+        
+        warnings_dataset = ds.dataset(parquet_files, format="parquet")
+        warnings_table = warnings_dataset.to_table()
+        
+        # Convert to pandas
+        warnings_df = warnings_table.to_pandas()
+        print(f"Loaded {len(warnings_df)} drug warning records")
+        
+        return warnings_df
     
     def load_mechanism_of_action(self, path):
         """Load mechanism of action data."""

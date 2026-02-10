@@ -9,6 +9,7 @@ import pyarrow as pa
 from src.utils.edge_utils import extract_edges
 from src.utils.graph_utils import custom_edges
 from src.features.edge import extract_moa_features
+from src.features.heuristic_scores import compute_heuristic_edge_features
 
 class GraphEdgeBuilder:
     """Builder for graph edges and edge features."""
@@ -191,11 +192,41 @@ class GraphEdgeBuilder:
             list(mappings['disease_key_mapping'].keys()),
             score_column
         )
-        self.edges['disease_gene'] = extract_edges(
-            filtered_associations.select(['diseaseId', 'targetId']),
-            mappings['disease_key_mapping'],
-            mappings['gene_key_mapping']
-        )
+        
+        # Check if we should extract association scores
+        use_scores = getattr(self.config, 'data_enrichment', {}).get('use_gene_disease_scores', False)
+        
+        if use_scores and score_column in filtered_associations.column_names:
+            # Extract edges with scores
+            df = filtered_associations.select(['diseaseId', 'targetId', score_column]).to_pandas()
+            
+            # Build edge tensor and score mapping
+            src_indices = []
+            dst_indices = []
+            self.disease_gene_scores = {}  # (disease_idx, gene_idx) -> score
+            
+            for _, row in df.iterrows():
+                disease_id = row['diseaseId']
+                gene_id = row['targetId']
+                score = row[score_column]
+                
+                if disease_id in mappings['disease_key_mapping'] and gene_id in mappings['gene_key_mapping']:
+                    d_idx = mappings['disease_key_mapping'][disease_id]
+                    g_idx = mappings['gene_key_mapping'][gene_id]
+                    src_indices.append(d_idx)
+                    dst_indices.append(g_idx)
+                    self.disease_gene_scores[(d_idx, g_idx)] = float(score) if score is not None else 0.0
+            
+            self.edges['disease_gene'] = torch.tensor([src_indices, dst_indices], dtype=torch.long)
+            print(f"  - Disease-Gene edges with scores: {len(src_indices)}")
+        else:
+            # Standard extraction without scores
+            self.edges['disease_gene'] = extract_edges(
+                filtered_associations.select(['diseaseId', 'targetId']),
+                mappings['disease_key_mapping'],
+                mappings['gene_key_mapping']
+            )
+            self.disease_gene_scores = {}
         
         # 7. Gene-Gene
         if self.config.network_config.get('use_ppi_network', False):
@@ -368,6 +399,14 @@ class GraphEdgeBuilder:
             total_edges = all_edge_index.shape[1]
             feature_dim = drug_gene_edge_features.shape[1]
             
+            # Check if we have gene-disease scores to add
+            use_scores = getattr(self.config, 'data_enrichment', {}).get('use_gene_disease_scores', False)
+            has_scores = hasattr(self, 'disease_gene_scores') and len(self.disease_gene_scores) > 0
+            
+            if use_scores and has_scores:
+                feature_dim += 1  # Add one dimension for association score
+                print(f"  Adding gene-disease association scores as edge feature")
+            
             # Create edge feature tensor for all edges
             all_edge_features = torch.zeros((total_edges, feature_dim), dtype=torch.float32)
             
@@ -375,18 +414,64 @@ class GraphEdgeBuilder:
             # Order matches strict order in create_edges:
             # 1. molecule_drugType
             # 2. molecule_disease
-            # 3. molecule_gene  <-- we are here
+            # 3. molecule_gene  <- drug-gene features go here
             
             edge_offset = (self.edges['molecule_drugType'].shape[1] + 
                           self.edges['molecule_disease'].shape[1])
             
             # Copy drug-gene edge features to the correct position
-            all_edge_features[edge_offset:edge_offset + num_drug_gene_edges] = drug_gene_edge_features
+            if use_scores and has_scores:
+                # Features are now [6 action types, 1 association score]
+                all_edge_features[edge_offset:edge_offset + num_drug_gene_edges, :drug_gene_edge_features.shape[1]] = drug_gene_edge_features
+            else:
+                all_edge_features[edge_offset:edge_offset + num_drug_gene_edges] = drug_gene_edge_features
+            
+            # Add gene-disease association scores if enabled
+            # Order: 4. gene_reactome, 5. disease_therapeutic, 6. disease_gene
+            if use_scores and has_scores:
+                disease_gene_offset = (
+                    self.edges['molecule_drugType'].shape[1] +
+                    self.edges['molecule_disease'].shape[1] +
+                    self.edges['molecule_gene'].shape[1] +
+                    self.edges['gene_reactome'].shape[1] +
+                    self.edges['disease_therapeutic'].shape[1]
+                )
+                
+                disease_gene_edges = self.edges['disease_gene']
+                score_col_idx = feature_dim - 1  # Last column is the score
+                
+                scores_added = 0
+                for i in range(disease_gene_edges.shape[1]):
+                    d_idx = disease_gene_edges[0, i].item()
+                    g_idx = disease_gene_edges[1, i].item()
+                    score = self.disease_gene_scores.get((d_idx, g_idx), 0.0)
+                    all_edge_features[disease_gene_offset + i, score_col_idx] = score
+                    if score > 0:
+                        scores_added += 1
+                
+                print(f"  - Disease-Gene scores added: {scores_added}/{disease_gene_edges.shape[1]}")
             
             print(f"\n Created edge feature matrix: {all_edge_features.shape}")
             print(f"  - Drug-gene edges with features: {num_drug_gene_edges}")
             print(f"  - Total edges: {total_edges}")
             print(f"  - Feature dimension: {feature_dim}")
+            
+            # Step 2: Add heuristic features (CN, AA, Jaccard) for ALL edges
+            print("\nComputing heuristic edge features (CN, AA, Jaccard)...")
+            try:
+                # Create a temporary Data object for heuristic computation
+                from torch_geometric.data import Data
+                temp_graph = Data(edge_index=all_edge_index, num_nodes=all_edge_index.max().item() + 1)
+                
+                heuristic_features = compute_heuristic_edge_features(temp_graph, all_edge_index)
+                print(f"  - Heuristic features shape: {heuristic_features.shape}")
+                
+                # Concatenate heuristics to existing edge features
+                all_edge_features = torch.cat([all_edge_features, heuristic_features], dim=1)
+                print(f"  - Final edge feature shape: {all_edge_features.shape}")
+            except Exception as he:
+                print(f"  Warning: Could not compute heuristic features: {he}")
+                print("  Proceeding without heuristics in edge features.")
             
             return all_edge_features
                 

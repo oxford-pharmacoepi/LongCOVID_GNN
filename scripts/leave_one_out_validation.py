@@ -35,7 +35,8 @@ from src.config import get_config
 from src.negative_sampling import get_sampler
 from src.training.losses import get_loss_function
 from src.utils.common import set_seed
-from src.models import GCNModel, SAGEModel, TransformerModel, MODEL_CLASSES
+from src.models import GCNModel, SAGEModel, TransformerModel, MODEL_CLASSES, LinkPredictor
+from src.features.heuristic_scores import compute_heuristic_edge_features
 from sklearn.metrics import average_precision_score, roc_auc_score, precision_recall_curve
 
 
@@ -49,52 +50,6 @@ def find_latest_graph(results_dir='results'):
     return latest
 
 
-class LinkPredictor(nn.Module):
-    """
-    Wrapper that adds link prediction capability to GNN encoder models.
-    
-    Uses the encoder to get node embeddings, then predicts edge probability
-    using dot product or MLP decoder.
-    """
-    
-    def __init__(self, encoder: nn.Module, hidden_channels: int = 128, decoder_type: str = 'dot'):
-        super().__init__()
-        self.encoder = encoder
-        self.decoder_type = decoder_type
-        
-        if decoder_type == 'mlp':
-            self.decoder = nn.Sequential(
-                nn.Linear(hidden_channels * 2, hidden_channels),
-                nn.ReLU(),
-                nn.Dropout(0.3),
-                nn.Linear(hidden_channels, 1)
-            )
-    
-    def encode(self, x: torch.Tensor, edge_index: torch.Tensor, edge_attr: torch.Tensor = None) -> torch.Tensor:
-        """Get node embeddings from the encoder."""
-        # Pass edge attributes if available
-        if edge_attr is not None:
-            return self.encoder(x, edge_index, edge_attr=edge_attr)
-        return self.encoder(x, edge_index)
-    
-    def decode(self, z: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
-        """Predict edge probability given node embeddings."""
-        src = z[edge_index[0]]
-        dst = z[edge_index[1]]
-        
-        if self.decoder_type == 'dot':
-            # Dot product decoder
-            return (src * dst).sum(dim=-1)
-        else:
-            # MLP decoder
-            edge_features = torch.cat([src, dst], dim=-1)
-            return self.decoder(edge_features).squeeze(-1)
-    
-    def forward(self, x: torch.Tensor, edge_index: torch.Tensor, 
-                pred_edges: torch.Tensor, edge_attr: torch.Tensor = None) -> torch.Tensor:
-        """Full forward pass: encode then decode."""
-        z = self.encode(x, edge_index, edge_attr=edge_attr)
-        return self.decode(z, pred_edges)
 
 
 class LeaveOneOutValidator:
@@ -358,12 +313,16 @@ class LeaveOneOutValidator:
              encoder = ModelClass(**kwargs)
         
         # Wrap with link predictor
-        model = LinkPredictor(encoder, hidden_channels=hidden_channels, decoder_type='dot')
+        # Use MLP decoder with configured type
+        # hidden_channels for decoder = out_channels of encoder (the embedding dimension)
+        out_channels = kwargs['out_channels']
+        decoder_type = model_config.get('decoder_type', 'mlp_interaction')
+        model = LinkPredictor(encoder, hidden_channels=out_channels, decoder_type=decoder_type, num_neighbor_features=3)
         
         return model.to(self.device)
     
     def train_model(self, model: torch.nn.Module, graph: torch.Tensor, 
-                    train_edges: torch.Tensor, train_labels: torch.Tensor) -> torch.nn.Module:
+                    train_edges: torch.Tensor, train_labels: torch.Tensor, log_metrics_file: str = None) -> torch.nn.Module:
         """Train model on the modified graph using Config settings."""
         model.train()
         
@@ -387,25 +346,124 @@ class LeaveOneOutValidator:
         
         print(f"  Training on {train_edges.shape[1]} edges (Positive: {torch.sum(train_labels==1)}, Negative: {torch.sum(train_labels==0)})")
         
+        # Precompute heuristic features for training edges (Phase 1)
+        print("  Computing heuristic features for training edges...")
+        # We need a CPU copy of graph for heuristic computation
+        graph_cpu = graph.cpu()
+        train_edges_cpu = train_edges.cpu()
+        # Do not normalise, as max values differ between train/inference sets
+        heuristic_feats = compute_heuristic_edge_features(graph_cpu, train_edges_cpu, normalise=False)
+        heuristic_feats_gpu = heuristic_feats.to(self.device)
+        print(f"  Heuristic features shape: {heuristic_feats.shape} (CN, AA, Jaccard)")
+        
+        if log_metrics_file:
+            # Initialise CSV
+            with open(log_metrics_file, 'w') as f:
+                f.write("epoch,train_loss,val_rank_median,val_hits_20\n")
+
         pbar = tqdm(range(self.epochs_per_fold), desc="Training", leave=False)
         for epoch in pbar:
+            model.train() # Ensure train mode
             optimizer.zero_grad()
             
             # Forward pass
             edge_attr = getattr(graph, 'edge_attr', None)
             z = model.encode(graph.x, graph.edge_index, edge_attr=edge_attr)
-            pred = model.decode(z, train_edges)
+            
+            # Use precomputed heuristics
+            # We assume training edges don't change, so heuristics computed once at start are valid
+            pass # Already computed
+            
+            pred = model.decode(z, train_edges, heuristic_features=heuristic_feats_gpu)
             
             # Loss
-            loss = criterion(pred, train_labels.float())
+            try:
+                # train_edges[1] contains target node indices (groups/diseases)
+                loss = criterion(pred, train_labels.float(), groups=train_edges[1])
+            except TypeError:
+                loss = criterion(pred, train_labels.float())
             
             # Backward pass
             loss.backward()
             optimizer.step()
             
-            pbar.set_postfix({'loss': f"{loss.item():.4f}"})
+            current_loss = loss.item()
+            pbar.set_postfix({'loss': f"{current_loss:.4f}"})
+            
+            # --- Diagnostic Logging ---
+            if log_metrics_file and (epoch % 5 == 0 or epoch == self.epochs_per_fold - 1):
+                # Run fast validation on target node if available
+                if hasattr(self, 'target_node_idx') and self.target_node_idx is not None:
+                    # Very simple inference: only rank connected drugs
+                    try:
+                        val_metrics = self.run_fast_validation_snapshot(model, z, self.target_node_idx)
+                        with open(log_metrics_file, 'a') as f:
+                            f.write(f"{epoch},{current_loss:.6f},{val_metrics['median_rank']},{val_metrics['hits_20']}\n")
+                    except Exception as e:
+                        print(f"Validation snapshot failed: {e}")
+            # --------------------------
         
         return model
+    
+    def run_fast_validation_snapshot(self, model: torch.nn.Module, z: torch.Tensor, target_node_idx: int) -> Dict:
+        """
+        Run a quick validation snapshot during training for diagnostics.
+        Only ranks drugs connected to the specific target node.
+        """
+        model.eval()
+        with torch.no_grad():
+            # Get drug indices
+            drug_indices = list(self.drug_key_mapping.values())
+            num_drugs = len(drug_indices)
+            
+            src = torch.tensor(drug_indices, dtype=torch.long, device=self.device)
+            dst = torch.tensor([target_node_idx] * num_drugs, dtype=torch.long, device=self.device)
+            query_edges = torch.stack([src, dst])
+            
+            # Compute heuristics (using CPU graph reference if available, else recompute)
+            # For speed, we just recompute normalisation=False
+            if hasattr(self, 'graph_cpu') and hasattr(self, 'query_edges_cpu'):
+                inf_heuristics = compute_heuristic_edge_features(self.graph_cpu, self.query_edges_cpu, normalise=False, show_progress=False)
+            else:
+                # Fallback
+                graph_cpu = self.graph.cpu()
+                inf_heuristics = compute_heuristic_edge_features(graph_cpu, query_edges.cpu(), normalise=False, show_progress=False)
+            
+            inf_heuristics_gpu = inf_heuristics.to(self.device)
+            
+            # Decode
+            scores = model.decode(z, query_edges, heuristic_features=inf_heuristics_gpu)
+            
+            # Compute Rank and Hits
+            # We need to know which drugs are TRUE positives for this target
+            # self.target_true_drugs should be set during setup
+            if not hasattr(self, 'target_true_drugs'):
+                return {'median_rank': -1, 'hits_20': -1}
+                
+            true_drug_indices = self.target_true_drugs
+            
+            # Sort scores descending
+            sorted_indices = torch.argsort(scores, descending=True)
+            sorted_drugs = src[sorted_indices].cpu().numpy()
+            
+            # Find ranks
+            ranks = []
+            for true_drug in true_drug_indices:
+                try:
+                    # Find where true drug is in sorted list
+                    # This is O(N) but N is small (1500 drugs)
+                    rank = np.where(sorted_drugs == true_drug)[0][0] + 1
+                    ranks.append(rank)
+                except IndexError:
+                    pass
+            
+            if not ranks:
+                return {'median_rank': -1, 'hits_20': 0}
+                
+            median_rank = np.median(ranks)
+            hits_20 = sum(r <= 20 for r in ranks)
+            
+            return {'median_rank': median_rank, 'hits_20': hits_20}
     
     def predict_edge(self, model: torch.nn.Module, graph: torch.Tensor,
                     source_idx: int, target_idx: int, 
@@ -708,6 +766,106 @@ class LeaveOneOutValidator:
         
         return output_path
 
+    def validate_multi_disease(self, k: int = 20):
+        """
+        Run LOO validation across diseases specified in config.
+        
+        Uses config.optimization_config.loo_validation_diseases list.
+        Returns aggregate metrics suitable for Bayesian optimization.
+        """
+        self.load_graph_data()
+        
+        # Get disease list from config
+        diseases = self.config.optimization_config.get('loo_validation_diseases', [])
+        
+        if not diseases:
+            print("No diseases specified in config.optimization_config.loo_validation_diseases")
+            return None
+        
+        print(f"\n{'='*80}")
+        print(f"MULTI-DISEASE LOO VALIDATION ({len(diseases)} diseases)")
+        print(f"{'='*80}\n")
+        
+        metrics = []
+        skipped = []
+        
+        for i, disease_id in enumerate(diseases):
+            # Check if disease exists in graph
+            if disease_id not in self.disease_key_mapping:
+                print(f"[{i+1}/{len(diseases)}] SKIPPED: {disease_id} not found in graph")
+                skipped.append(disease_id)
+                continue
+            
+            disease_idx = self.disease_key_mapping[disease_id]
+            drug_count = len(self.get_drug_neighbors(disease_idx))
+            
+            print(f"\n[{i+1}/{len(diseases)}] Validating {disease_id} ({drug_count} known drugs)...")
+            
+            if drug_count == 0:
+                print(f"  SKIPPED: No drug connections")
+                skipped.append(disease_id)
+                continue
+            
+            metric = self.validate_specific_node(disease_id, k=k, return_metrics=True)
+            if metric:
+                metric['disease_id'] = disease_id
+                metric['drug_count'] = drug_count
+                metrics.append(metric)
+        
+        if not metrics:
+            print("\nNo valid metrics collected.")
+            return None
+        
+        # Calculate aggregate metrics
+        total_hits = sum(m['hits'] for m in metrics)
+        total_true = sum(m.get('drug_count', 0) for m in metrics)
+        avg_hits = np.mean([m['hits'] for m in metrics])
+        avg_mean_rank = np.mean([m['mean_rank'] for m in metrics])
+        avg_median_rank = np.mean([m['median_rank'] for m in metrics])
+        
+        # Hits@K rate (for optimisation)
+        hits_at_k_rate = total_hits / total_true if total_true > 0 else 0
+        
+        print(f"\n{'='*80}")
+        print(f"MULTI-DISEASE SUMMARY ({len(metrics)}/{len(diseases)} diseases validated)")
+        print(f"{'='*80}")
+        print(f"\nPer-disease averages:")
+        print(f"  Avg Hits@{k}: {avg_hits:.2f}")
+        print(f"  Avg Mean Rank: {avg_mean_rank:.1f}")
+        print(f"  Avg Median Rank: {avg_median_rank:.1f}")
+        print(f"\nAggregate:")
+        print(f"  Total Hits@{k}: {total_hits} / {total_true}")
+        print(f"  Hits@{k} Rate: {hits_at_k_rate:.4f}")
+        
+        if skipped:
+            print(f"\nSkipped diseases: {skipped}")
+        
+        return {
+            'hits_at_k_rate': hits_at_k_rate,
+            'total_hits': total_hits,
+            'total_true': total_true,
+            'avg_hits': avg_hits,
+            'avg_mean_rank': avg_mean_rank,
+            'avg_median_rank': avg_median_rank,
+            'n_diseases': len(metrics),
+            'per_disease': metrics
+        }
+    
+    def get_drug_neighbors(self, disease_idx: int) -> set:
+        """Get set of drug indices connected to a disease."""
+        drug_indices = set(self.drug_key_mapping.values())
+        neighbors = set()
+        
+        edge_index = self.graph.edge_index
+        for i in range(edge_index.shape[1]):
+            src, dst = edge_index[0, i].item(), edge_index[1, i].item()
+            if dst == disease_idx and src in drug_indices:
+                neighbors.add(src)
+            if src == disease_idx and dst in drug_indices:
+                neighbors.add(dst)
+        
+        return neighbors
+
     def validate_top_diseases(self, n: int = 5, k: int = 20):
         """
         Run validation on the top N diseases with the most known drugs.
@@ -759,7 +917,46 @@ class LeaveOneOutValidator:
         print(f"Average Mean Rank: {avg_mean_rank:.1f}")
         print(f"Average Median Rank: {avg_median_rank:.1f}")
         
-    def validate_specific_node(self, target_node_name: str, k: int = 20, return_metrics: bool = False):
+    def load_safety_data(self):
+        """Load drug warnings into a dictionary: ChemBL ID -> Warning details"""
+        import glob
+        import pyarrow.dataset as ds
+        
+        print("\nLoading drug safety data for inference filtering...")
+        try:
+            path = self.config.paths['drugWarnings']
+            parquet_files = glob.glob(f"{path}/*.parquet")
+            
+            if not parquet_files:
+                print("  Warning: No drug warning files found.")
+                return {}
+            
+            dataset = ds.dataset(parquet_files, format="parquet")
+            table = dataset.to_table()
+            df = table.to_pandas()
+            
+            warnings_map = {}
+            for _, row in df.iterrows():
+                ids = row['chemblIds']
+                w_type = row['warningType']
+                
+                if not isinstance(ids, (list, np.ndarray)):
+                    continue
+                    
+                for chembl_id in ids:
+                    if chembl_id not in warnings_map:
+                        warnings_map[chembl_id] = []
+                    if w_type not in warnings_map[chembl_id]:
+                        warnings_map[chembl_id].append(w_type)
+            
+            print(f"  Loaded warnings for {len(warnings_map)} drugs.")
+            return warnings_map
+        except Exception as e:
+            print(f"  Failed to load safety data: {e}")
+            return {}
+
+    def validate_specific_node(self, target_node_name: str, k: int = 20, return_metrics: bool = False, log_metrics_file: str = None):
+        safety_map = self.load_safety_data()
         """
         Validate ability to recover drug-disease edges for a specific disease.
         
@@ -770,6 +967,7 @@ class LeaveOneOutValidator:
         Args:
             target_node_name: Name of disease to test (e.g. 'EFO_0003854')
             k: Top k predictions to show
+            log_metrics_file: Optional path to save CSV with per-epoch metrics
         """
         if not hasattr(self, 'graph'):
             self.load_graph_data()
@@ -815,6 +1013,10 @@ class LeaveOneOutValidator:
                 true_drug_neighbors.add(disease_idx)
         
         print(f"Node has {len(true_drug_neighbors)} drug-disease connections.")
+        
+        # Cache for fast validation snapshot
+        self.target_true_drugs = true_drug_neighbors
+        self.target_node_idx = node_idx
         
         if len(true_drug_neighbors) == 0:
             print("Warning: No drug-disease edges found for this node.")
@@ -915,11 +1117,16 @@ class LeaveOneOutValidator:
         
         neg_edges = torch.tensor(neg_samples_list, dtype=torch.long).t()
         
+        # Ensure label count matches actual samples received
+        actual_num_neg = len(neg_samples_list)
+        if actual_num_neg != int(num_neg):
+            print(f"Warning: Requested {int(num_neg)} negatives, but received {actual_num_neg}")
+            
         train_edges = torch.cat([train_pos_edges, neg_edges], dim=1)
-        train_labels = torch.cat([torch.ones(train_pos_edges.shape[1]), torch.zeros(num_neg)])
+        train_labels = torch.cat([torch.ones(train_pos_edges.shape[1]), torch.zeros(actual_num_neg)])
         
         model = self.create_model(train_graph.x.shape[1])
-        model = self.train_model(model, train_graph, train_edges, train_labels)
+        model = self.train_model(model, train_graph, train_edges, train_labels, log_metrics_file=log_metrics_file)
         
         # 5. Inference:  Predict drug-disease links
         print("Running inference (ranking drugs for target disease)...")
@@ -931,51 +1138,82 @@ class LeaveOneOutValidator:
         with torch.no_grad():
             edge_attr = getattr(inf_graph, 'edge_attr', None)
             z = model.encode(inf_graph.x, inf_graph.edge_index, edge_attr=edge_attr)
-            z_target = z[node_idx]  # Embedding of target disease
-            
-            # Get all drug node indices
+            # Construct query edges
             drug_indices = list(self.drug_key_mapping.values())
+            num_drugs = len(drug_indices)
             
-            # Score ONLY against drug nodes
+            src = torch.tensor(drug_indices, dtype=torch.long, device=self.device)
+            dst = torch.tensor([node_idx] * num_drugs, dtype=torch.long, device=self.device)
+            query_edges = torch.stack([src, dst])
+            
+            # Compute heuristics for inference query
+            # Use training graph as reference (CPU copy needed for heuristic algo)
+            inf_graph_cpu = inf_graph.cpu()
+            query_edges_cpu = query_edges.cpu()
+            
+            inf_heuristics = compute_heuristic_edge_features(inf_graph_cpu, query_edges_cpu, normalise=False)
+            inf_heuristics_gpu = inf_heuristics.to(self.device)
+            
+            # Decode in one batch
+            scores = model.decode(z, query_edges, heuristic_features=inf_heuristics_gpu)
+            probs = torch.sigmoid(scores)
+            
             drug_results = []
-            for drug_idx in drug_indices:
-                z_drug = z[drug_idx]
-                score = (z_target * z_drug).sum().item()  # Dot product
-                prob = torch.sigmoid(torch.tensor(score)).item()
-                drug_results.append((drug_idx, score, prob))
+            for i, drug_idx in enumerate(drug_indices):
+                score = scores[i].item()
+                prob = probs[i].item()
+                cn = inf_heuristics[i, 0].item()  # Common Neighbors
+                aa = inf_heuristics[i, 1].item()  # Adamic-Adar
+                drug_results.append((drug_idx, score, prob, cn, aa))
             
             # Sort by score
             sorted_drugs = sorted(drug_results, key=lambda x: x[1], reverse=True)
             
             print(f"\nTop {k} Drug Predictions for {true_name}:")
-            print(f"{'Rank':<5} {'Score':<10} {'Prob':<10} {'Drug ID':<20} {'Is True Connection?'}")
-            print("-" * 90)
+            print(f"{'Rank':<5} {'Score':<10} {'Prob':<10} {'CN':<8} {'AA':<8} {'Drug ID':<20} {'Warning':<20} {'Is True?'}")
+            print("-" * 120)
             
             hits = 0
-            for rank, (drug_idx, score, prob) in enumerate(sorted_drugs[:k], 1):
+            for rank, (drug_idx, score, prob, cn, aa) in enumerate(sorted_drugs[:k], 1):
                 drug_id = self.idx_to_drug.get(drug_idx, "Unknown")
                 is_true = drug_idx in true_drug_neighbors
                 mark = "✓ YES (RECOVERED)" if is_true else ""
+
+                # Check warnings using ChemBL ID
+                warnings = safety_map.get(drug_id, [])
+                safe_str = ", ".join(warnings) if warnings else "Safe"
+                if "Black Box Warning" in warnings:
+                    safe_str = " LACK BOX"
+                elif "Withdrawn" in warnings:
+                    safe_str = "WITHDRAWN"
+
                 if is_true:
                     hits += 1
                 
-                print(f"{rank:<5} {score:<10.4f} {prob:<10.4f} {drug_id:<20} {mark}")
+                print(f"{rank:<5} {score:<10.4f} {prob:<10.4f} {cn:<8.1f} {aa:<8.2f} {drug_id:<20} {safe_str:<20} {mark}")
             
             # Calculate ranks for all true neighbors
             print(f"\nAnalysis of True Drug Connections (Total: {len(true_drug_neighbors)}):")
-            print(f"{'Drug ID':<20} {'Rank':<8} {'Score':<10} {'Prob':<10}")
-            print("-" * 60)
+            print(f"{'Drug ID':<20} {'Rank':<8} {'Score':<10} {'GNN':<10} {'Heur':<10} {'Prob':<10} {'Warning'}")
+            print("-" * 120)
             
             ranks = []
             # Helper map for fast lookup
-            rank_map = {d: (r, s, p) for r, (d, s, p) in enumerate(sorted_drugs, 1)}
+            rank_map = {d: (r, s, p, g, h) for r, (d, s, p, g, h) in enumerate(sorted_drugs, 1)}
             
             for drug_idx in true_drug_neighbors:
                 if drug_idx in rank_map:
-                    rank, score, prob = rank_map[drug_idx]
+                    rank, score, prob, gnn_s, h_s = rank_map[drug_idx]
                     ranks.append(rank)
                     drug_id = self.idx_to_drug.get(drug_idx, "Unknown")
-                    print(f"{drug_id:<20} {rank:<8} {score:<10.4f} {prob:<10.4f}")
+                    
+                    # Check warnings
+                    warnings = safety_map.get(drug_id, [])
+                    safe_str = ", ".join(warnings) if warnings else "Safe"
+                    if "Black Box Warning" in warnings: safe_str = "BLACK BOX"
+                    elif "Withdrawn" in warnings: safe_str = "WITHDRAWN"
+                    
+                    print(f"{drug_id:<20} {rank:<8} {score:<10.4f} {gnn_s:<10.4f} {h_s:<10.4f} {prob:<10.4f} {safe_str}")
                 else:
                     # Should not happen if all drugs are scored
                     ranks.append(len(sorted_drugs) + 1)
@@ -1014,6 +1252,8 @@ def main():
                        help='Training epochs per fold (default: from config)')
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed')
+    parser.add_argument('--log-metrics', type=str, default=None,
+                       help='Path to CSV file to log per-epoch validation metrics')
     parser.add_argument('--model', type=str, default='TransformerModel',
                        choices=['GCN', 'SAGE', 'Transformer', 'GCNModel', 'SAGEModel', 'TransformerModel'],
                        help='Model to use')
@@ -1021,6 +1261,12 @@ def main():
                        help='Specific node to validate (e.g. "EFO_0003854").')
     parser.add_argument('--top-diseases', type=int, default=0,
                         help='Number of top diseases (by connections) to validate automatically. Defaults to 5 if no target specified and no global options set.')
+    parser.add_argument('--multi-disease', action='store_true',
+                        help='Run LOO validation across diseases defined in config.optimization_config.loo_validation_diseases')
+    parser.add_argument('--override-config', nargs='*', help='Override config values (key=value)')
+    parser.add_argument("--layers", type=int, help="Number of GNN layers")
+    parser.add_argument("--decoder-type", type=str, choices=['dot', 'mlp', 'mlp_interaction', 'mlp_neighbor'], 
+                      help="Type of decoder to use")
     
     args = parser.parse_args()
     
@@ -1030,6 +1276,52 @@ def main():
     # Get config
     config = get_config()
     config.model_choice = args.model
+    
+    # Apply CLI args
+    if args.layers:
+        config.model_config['num_layers'] = args.layers
+        print(f"Using CLI layers: {args.layers}")
+        
+    if args.decoder_type:
+        config.model_config['decoder_type'] = args.decoder_type
+        print(f"Using CLI decoder: {args.decoder_type}")
+    
+    # Apply type-safe overrides
+    if args.override_config:
+        print("\nApplying config overrides:")
+        for item in args.override_config:
+            try:
+                key, value = item.split('=')
+                # Attempt to convert value to appropriate type
+                if value.isdigit():
+                    value = int(value)
+                elif value.replace('.','',1).isdigit():
+                    value = float(value)
+                elif value.lower() == 'true':
+                    value = True
+                elif value.lower() == 'false':
+                    value = False
+                
+                # Navigate nested keys
+                parts = key.split('.')
+                target = config
+                for part in parts[:-1]:
+                    if isinstance(target, dict):
+                        target = target[part]
+                    else:
+                        target = getattr(target, part)
+                
+                # Set value
+                last_key = parts[-1]
+                if isinstance(target, dict):
+                    target[last_key] = value
+                else:
+                    setattr(target, last_key, value)
+                    
+                print(f"  - {key} = {value}")
+            except Exception as e:
+                print(f"  ! Failed to set {item}: {e}")
+    # End overrides
     
     # Set epochs from config if not provided
     if args.epochs is None:
@@ -1058,10 +1350,15 @@ def main():
     
     if args.target_node:
         # 1. Run specific node validation
-        validator.validate_specific_node(args.target_node)
+        validator.validate_specific_node(args.target_node, log_metrics_file=args.log_metrics)
+    
+    elif args.multi_disease:
+        # 2. Run multi-disease LOO (diseases from config)
+        k = config.optimization_config.get('loo_k', 20)
+        validator.validate_multi_disease(k=k)
         
     elif args.top_diseases > 0:
-        # 2. Run top N diseases validation
+        # 3. Run top N diseases validation
         validator.validate_top_diseases(n=args.top_diseases)
         
     elif not args.sample_size and not args.num_folds:

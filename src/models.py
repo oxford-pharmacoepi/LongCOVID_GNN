@@ -191,6 +191,126 @@ class SAGEModel(torch.nn.Module):
         return x
 
 
+
+class LinkPredictor(nn.Module):
+    """
+    Link predictor with neighborhood-aware decoder options.
+    
+    Decoder Types:
+    - 'dot': Simple dot product (baseline)
+    - 'mlp': MLP on [src, dst] concatenation  
+    - 'mlp_interaction': MLP with interaction features [src, dst, src*dst, |src-dst|]
+    - 'mlp_neighbor': Full version with [src, dst, src*dst, |src-dst|, neighbor_features]
+    
+    The interaction features help capture neighborhood similarity like heuristics.
+    """
+    def __init__(self, encoder: nn.Module, hidden_channels: int = 128, 
+                 decoder_type: str = 'mlp_interaction', temperature: float = 5.0,
+                 num_neighbor_features: int = 3):
+        super().__init__()
+        self.encoder = encoder
+        self.decoder_type = decoder_type
+        self.temperature = temperature
+        self.hidden_channels = hidden_channels
+        
+        if decoder_type == 'mlp_interaction':
+            # Interaction decoder: [src, dst, src*dst, |src-dst|] -> score
+            # Input dimension: 4 * hidden_channels
+            input_dim = hidden_channels * 4
+            self.decoder = nn.Sequential(
+                nn.Linear(input_dim, hidden_channels),
+                nn.ReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(hidden_channels, hidden_channels // 2),
+                nn.ReLU(),
+                nn.Dropout(0.2),
+                nn.Linear(hidden_channels // 2, 1)
+            )
+        elif decoder_type == 'mlp_neighbor':
+            # Full decoder with explicit neighbor features
+            # [src, dst, src*dst, |src-dst|, neighbor_features (CN, AA, Jaccard)]
+            input_dim = hidden_channels * 4 + num_neighbor_features
+            self.decoder = nn.Sequential(
+                nn.Linear(input_dim, hidden_channels),
+                nn.ReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(hidden_channels, hidden_channels // 2),
+                nn.ReLU(),
+                nn.Dropout(0.2),
+                nn.Linear(hidden_channels // 2, 1)
+            )
+        elif decoder_type == 'mlp':
+            # Standard MLP on concatenation
+            input_dim = hidden_channels * 2
+            self.decoder = nn.Sequential(
+                nn.Linear(input_dim, hidden_channels),
+                nn.ReLU(),
+                nn.Dropout(0.3),
+                nn.Linear(hidden_channels, 1)
+            )
+        else:
+            # Dot product decoder
+            self.decoder = None
+
+    def encode(self, x, edge_index, edge_attr=None):
+        """Encode nodes using the GNN encoder."""
+        return self.encoder(x, edge_index, edge_attr)
+
+    def decode(self, z: torch.Tensor, edge_index: torch.Tensor, 
+               heuristic_features: torch.Tensor = None) -> torch.Tensor:
+        """
+        Predict edge scores given node embeddings and optional heuristics.
+        
+        Args:
+            z: Node embeddings [num_nodes, hidden_channels]
+            edge_index: Edges to predict [2, num_edges]
+            heuristic_features: [num_edges, K] with neighbor features (for mlp_neighbor)
+            
+        Returns:
+            scores: [num_edges] raw logits
+        """
+        src = z[edge_index[0]]
+        dst = z[edge_index[1]]
+        
+        if self.decoder_type == 'mlp_interaction':
+            # Use interaction features to capture neighborhood similarity
+            interaction = src * dst  # Element-wise product
+            difference = torch.abs(src - dst)  # Absolute difference
+            edge_repr = torch.cat([src, dst, interaction, difference], dim=-1)
+            score = self.decoder(edge_repr).squeeze(-1)
+            
+        elif self.decoder_type == 'mlp_neighbor':
+            # Full features with explicit neighbor counts
+            interaction = src * dst
+            difference = torch.abs(src - dst)
+            base_repr = torch.cat([src, dst, interaction, difference], dim=-1)
+            
+            if heuristic_features is not None:
+                h_feats = heuristic_features.to(src.device).float()
+                edge_repr = torch.cat([base_repr, h_feats], dim=-1)
+            else:
+                # Fallback: pad with zeros if no heuristics provided
+                zeros = torch.zeros(src.size(0), 3, device=src.device)
+                edge_repr = torch.cat([base_repr, zeros], dim=-1)
+            score = self.decoder(edge_repr).squeeze(-1)
+            
+        elif self.decoder_type == 'mlp':
+            edge_repr = torch.cat([src, dst], dim=-1)
+            score = self.decoder(edge_repr).squeeze(-1)
+            
+        else:
+            # Dot product decoder
+            score = (src * dst).sum(dim=-1)
+            
+        return score
+    
+    def predict_proba(self, z: torch.Tensor, edge_index: torch.Tensor, 
+                      heuristic_features: torch.Tensor = None) -> torch.Tensor:
+        """Get calibrated probabilities using temperature scaling."""
+        raw_scores = self.decode(z, edge_index, heuristic_features)
+        return torch.sigmoid(raw_scores / self.temperature)
+
+
 # Dictionary for easy model selection
 MODEL_CLASSES = {
     'GCN': GCNModel,

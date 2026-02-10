@@ -21,7 +21,8 @@ from tqdm import tqdm
 import glob
 
 # Import from shared modules
-from src.models import GCNModel, TransformerModel, SAGEModel, MODEL_CLASSES
+from src.models import GCNModel, TransformerModel, SAGEModel, MODEL_CLASSES, LinkPredictor
+from src.features.heuristic_scores import compute_heuristic_edge_features
 from src.utils.common import set_seed, enable_full_reproducibility
 from src.utils.eval_utils import calculate_metrics
 from src.utils.edge_utils import generate_pairs
@@ -163,6 +164,32 @@ class ModelTrainer:
         primary_metric = self.config.primary_metric if hasattr(self.config, 'primary_metric') else 'auc'
         print(f"Using {primary_metric.upper()} as primary metric for model selection")
         
+        # ------------------------------------------------------------------
+        # Phase 1: Compute Heuristics (Add to features)
+        # ------------------------------------------------------------------
+        print("Computing heuristic feature scores for Training & Validation...")
+        # Move graph to CPU for heuristic calculation (networkx/numpy based)
+        graph_cpu = graph.cpu()
+        
+        # 1. Training Heuristics
+        # Combine pos and neg edges for batch computation: [2, N]
+        train_edges_all = torch.cat([pos_edge_index.cpu(), neg_edge_index.cpu()], dim=1)
+        train_heuristics = compute_heuristic_edge_features(graph_cpu, train_edges_all)
+        
+        # Split back
+        n_pos = pos_edge_index.size(1)
+        train_pos_h = train_heuristics[:n_pos]
+        train_neg_h = train_heuristics[n_pos:]
+        
+        print(f"Computed heuristics for {n_pos} positive and {neg_edge_index.size(1)} negative training edges.")
+        
+        # 2. Validation Heuristics
+        val_edges_T = val_edge_tensor.cpu().T
+        val_heuristics = compute_heuristic_edge_features(graph_cpu, val_edges_T)
+        print(f"Computed heuristics for {val_edge_tensor.size(0)} validation edges.")
+        
+        # ------------------------------------------------------------------
+        
         # Log model-specific parameters to MLflow
         if self.tracker:
             self.tracker.log_param(f"{model_name}_architecture", model_class.__name__)
@@ -199,13 +226,20 @@ class ModelTrainer:
         else:
             print("  Note: No edge features found")
             edge_attr = None
-            # Initialise model
-            model = model_class(
+            # Initialise model (Encoder)
+            encoder = model_class(
                 in_channels=graph.x.size(1),
                 hidden_channels=self.model_config['hidden_channels'],
                 out_channels=self.model_config['out_channels'],
                 num_layers=self.model_config['num_layers'],
                 dropout_rate=self.model_config['dropout_rate']
+            )
+            
+            # Wrap in LinkPredictor with learned heuristic decoder
+            model = LinkPredictor(
+                encoder=encoder,
+                hidden_channels=self.model_config['out_channels'],
+                decoder_type='mlp_heuristic'  # GNN learns to weight heuristics fairly
             ).to(self.device)
         
         # Use lower learning rate for SAGE model (more stable)
@@ -241,6 +275,9 @@ class ModelTrainer:
         graph = graph.to(self.device)
         pos_edge_index = pos_edge_index.to(self.device)
         neg_edge_index = neg_edge_index.to(self.device)
+        train_pos_h = train_pos_h.to(self.device)
+        train_neg_h = train_neg_h.to(self.device)
+        val_heuristics = val_heuristics.to(self.device)
         val_edge_tensor = val_edge_tensor.to(self.device)
         val_label_tensor = val_label_tensor.to(self.device)
         if has_edge_attr:
@@ -283,9 +320,10 @@ class ModelTrainer:
             # Normalise embeddings to unit sphere (prevents saturation)
             z = F.normalize(z, p=2, dim=1)
             
-            # Compute edge scores (now bounded to [-1, 1])
-            pos_scores = (z[pos_edge_index[0]] * z[pos_edge_index[1]]).sum(dim=-1)
-            neg_scores = (z[neg_edge_index[0]] * z[neg_edge_index[1]]).sum(dim=-1)
+            # Compute edge scores using LinkPredictor
+            # It handles dot product + heuristic injection + boosting
+            pos_scores = model.decode(z, pos_edge_index, heuristic_features=train_pos_h)
+            neg_scores = model.decode(z, neg_edge_index, heuristic_features=train_neg_h)
             
             # Compute loss using the custom loss function
             all_scores = torch.cat([pos_scores, neg_scores])
@@ -319,7 +357,9 @@ class ModelTrainer:
                     # Normalise embeddings in validation too
                     z = F.normalize(z, p=2, dim=1)
                     
-                    val_scores = (z[val_edge_tensor[:, 0]] * z[val_edge_tensor[:, 1]]).sum(dim=-1)
+                    # LinkPredictor decode. val_edge_tensor is [N, 2] -> edge_index [2, N]
+                    val_edge_index = val_edge_tensor.T
+                    val_scores = model.decode(z, val_edge_index, heuristic_features=val_heuristics)
                     val_loss = loss_function(val_scores, val_label_tensor.float())
                     val_probs = torch.sigmoid(val_scores)
                     
@@ -388,7 +428,8 @@ class ModelTrainer:
             # Normalise embeddings (must match training validation!)
             z = F.normalize(z, p=2, dim=1)
             
-            val_scores = (z[val_edge_tensor[:, 0]] * z[val_edge_tensor[:, 1]]).sum(dim=-1)
+            val_edge_index = val_edge_tensor.T
+            val_scores = model.decode(z, val_edge_index, heuristic_features=val_heuristics)
             val_probs = torch.sigmoid(val_scores)
             val_preds = (val_probs >= best_threshold).float()
             

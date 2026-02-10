@@ -5,7 +5,7 @@ Node feature builder strategy.
 import torch
 import pyarrow as pa
 from src.utils.edge_utils import get_indices_from_keys
-from src.utils.feature_utils import boolean_encode, normalize, extract_biotype_features
+from src.utils.feature_utils import boolean_encode, normalise, extract_biotype_features
 
 class NodeFeatureBuilder:
     """Builder for node features across different entity types."""
@@ -59,14 +59,74 @@ class NodeFeatureBuilder:
             mappings['therapeutic_area_list'], mappings['therapeutic_area_key_mapping']
         ), dtype=torch.long)
         
-        # Create drug features from molecule table
+        # Drug features from molecule table
         molecule_table = pa.Table.from_pandas(molecule_df)
         
         blackBoxWarning = molecule_table.column('blackBoxWarning').combine_chunks()
         blackBoxWarning_vector = boolean_encode(blackBoxWarning, drug_indices)
         
         yearOfFirstApproval = molecule_table.column('yearOfFirstApproval').combine_chunks()
-        yearOfFirstApproval_vector = normalize(yearOfFirstApproval, drug_indices)
+        yearOfFirstApproval_vector = normalise(yearOfFirstApproval, drug_indices)
+        
+        # --- PHASE 3: Safety & Toxicity Features ---
+        use_warnings = self.config.data_enrichment.get('use_drug_warnings', False)
+        
+        print("Extracting drug safety features...")
+        safety_features = torch.zeros(len(drug_indices), 20)  # Reserve 20 dims for safety
+        
+        if use_warnings:
+            try:
+                warnings_df = self.processor.load_drug_warnings(self.config.paths['drug_warnings'])
+                
+                # Create detailed toxicity map
+                drug_safety_map = {}
+                
+                # Toxicity classes seen in inspection:
+                toxicity_classes = [
+                    'Cardiotoxicity', 'Hepatotoxicity', 'Neurotoxicity', 'Misuse', 
+                    'Carcinogenicity', 'Hematological toxicity', 'Teratogenicity', 
+                    'Vascular toxicity', 'Psychiatric toxicity', 'Respiratory toxicity', 
+                    'Gastrotoxicity', 'Immune system toxicity', 'Dermatological toxicity', 
+                    'Infections', 'Nephrotoxicity', 'Metabolism toxicity', 'Musculoskeletal toxicity'
+                ]
+                tox_to_idx = {t: i for i, t in enumerate(toxicity_classes)}
+                
+                for _, row in warnings_df.iterrows():
+                    # warnings_df has 'chemblIds' as a list/array
+                    chembl_ids = row['chemblIds']
+                    if not isinstance(chembl_ids, (list, np.ndarray)):
+                        continue
+                        
+                    is_withdrawn = (row['warningType'] == 'Withdrawn')
+                    is_black_box = (row['warningType'] == 'Black Box Warning')
+                    tox_class = row.get('toxicityClass')
+                    
+                    for chembl_id in chembl_ids:
+                        if chembl_id not in drug_safety_map:
+                            # [has_warning, is_withdrawn, is_black_box, *17_tox_classes]
+                            drug_safety_map[chembl_id] = np.zeros(20, dtype=np.float32)
+                            
+                        # Set flags
+                        drug_safety_map[chembl_id][0] = 1.0  # has_warning
+                        if is_withdrawn: drug_safety_map[chembl_id][1] = 1.0
+                        if is_black_box: drug_safety_map[chembl_id][2] = 1.0
+                        
+                        # Set toxicity class bit
+                        if tox_class in tox_to_idx:
+                            offset = 3 + tox_to_idx[tox_class]
+                            drug_safety_map[chembl_id][offset] = 1.0
+                
+                ordered_drugs = mappings['approved_drugs_list'] # This matches the order of drug_indices
+                
+                for i, chembl_id in enumerate(ordered_drugs):
+                    if chembl_id in drug_safety_map:
+                        safety_features[i] = torch.tensor(drug_safety_map[chembl_id])
+                        
+                print(f"  Processed warnings for {len(drug_safety_map)} drugs")
+                
+            except Exception as e:
+                print(f"  Warning: Failed to load drug warnings: {e}")
+        # -------------------------------------------
         
         # Create one-hot encodings for node types
         node_type_vectors = {
@@ -96,12 +156,17 @@ class NodeFeatureBuilder:
         print(f"Gene bioType features shape: {gene_biotype_features.shape}")
         
         # Create feature matrices for each node type
-        # Drug features: node_type (6) + blackBoxWarning (1) + yearOfFirstApproval (1) = 8 features
-        drug_feature_matrix = torch.cat([
+        # Drug features: node_type (6) + blackBoxWarning (1) + yearOfFirstApproval (1) + safety (20 optional)
+        drug_feats_list = [
             torch.tensor([node_type_vectors['drug']], dtype=torch.float32).repeat(len(drug_indices), 1),
             blackBoxWarning_vector,
             yearOfFirstApproval_vector
-        ], dim=1)
+        ]
+        
+        if use_warnings:
+            drug_feats_list.append(safety_features)
+            
+        drug_feature_matrix = torch.cat(drug_feats_list, dim=1)
         
         # Drug type features: node_type (6) + padding (2) = 8 features
         drug_type_feature_matrix = torch.cat([

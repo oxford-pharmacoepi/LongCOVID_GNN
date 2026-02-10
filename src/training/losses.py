@@ -476,6 +476,113 @@ class RankingAwareBCELoss(nn.Module):
         return total_loss
 
 
+
+class GroupedRankingAwareLoss(RankingAwareBCELoss):
+    """
+    Ranking-aware BCE loss that restricts ranking comparisons to within-group pairs.
+    Useful for per-disease ranking where comparing Drug A (Disease 1) vs Drug B (Disease 2) is meaningless.
+    """
+    
+    def forward(self, logits, targets, groups=None, **kwargs):
+        """
+        Compute grouped ranking-aware loss.
+        
+        Args:
+            logits: Model predictions
+            targets: Ground truth labels
+            groups: Group IDs (e.g. disease indices) for each sample. 
+                   If None, falls back to global ranking.
+        """
+        # 1. Standard weighted BCE (same as parent)
+        if self.pos_weight is None:
+            n_pos = (targets == 1).sum().float()
+            n_neg = (targets == 0).sum().float()
+            pos_weight = n_neg / (n_pos + 1e-8)
+        else:
+            pos_weight = self.pos_weight
+        
+        weights = torch.where(
+            targets == 1,
+            torch.full_like(targets, pos_weight, dtype=torch.float32),
+            torch.ones_like(targets, dtype=torch.float32)
+        )
+        
+        bce_loss = F.binary_cross_entropy_with_logits(logits, targets.float(), reduction='none')
+        bce_loss = (bce_loss * weights).mean()
+        
+        # 2. Grouped Ranking loss
+        pos_mask = targets == 1
+        neg_mask = targets == 0
+        
+        ranking_loss = torch.tensor(0.0, device=logits.device)
+        
+        if pos_mask.sum() > 0 and neg_mask.sum() > 0:
+            pos_scores = torch.sigmoid(logits[pos_mask])
+            neg_scores = torch.sigmoid(logits[neg_mask])
+            
+            # Global vs Grouped
+            if groups is None:
+                # Fallback to global
+                pos_expanded = pos_scores.unsqueeze(1)
+                neg_expanded = neg_scores.unsqueeze(0)
+                diff = pos_expanded - neg_expanded
+                valid_pairs = torch.ones_like(diff, dtype=torch.bool)
+            else:
+                # Grouped ranking - optimised implementation
+                # Avoid O(N*M) matrix by iterating over common groups
+                pos_groups = groups[pos_mask]
+                neg_groups = groups[neg_mask]
+                
+                ranking_loss_sum = torch.tensor(0.0, device=logits.device)
+                total_pairs = torch.tensor(0.0, device=logits.device)
+                
+                # Find groups present in both positive and negative sets
+                u_pos = torch.unique(pos_groups)
+                u_neg = torch.unique(neg_groups)
+                
+                # Intersection of groups
+                # Concatenate and find duplicates
+                combined = torch.cat((u_pos, u_neg))
+                uniques, counts = combined.unique(return_counts=True)
+                common_groups = uniques[counts > 1]
+                
+                # Iterate over common groups (typically < 1000)
+                for g in common_groups:
+                    p_mask_g = (pos_groups == g)
+                    n_mask_g = (neg_groups == g)
+                    
+                    p_scores_g = pos_scores[p_mask_g]
+                    n_scores_g = neg_scores[n_mask_g]
+                    
+                    # Compute pairwise loss for this group
+                    # [N_pg, 1] - [1, N_ng]
+                    diff_g = p_scores_g.unsqueeze(1) - n_scores_g.unsqueeze(0)
+                    loss_g = F.relu(self.margin - diff_g)
+                    
+                    ranking_loss_sum += loss_g.sum()
+                    total_pairs += loss_g.numel()
+                
+                if total_pairs > 0:
+                    ranking_loss = ranking_loss_sum / total_pairs
+            
+            # 3. Variance regularisation
+            pos_var = pos_scores.var() if pos_scores.numel() > 1 else torch.tensor(0.0, device=logits.device)
+            neg_var = neg_scores.var() if neg_scores.numel() > 1 else torch.tensor(0.0, device=logits.device)
+            target_var = 0.1
+            variance_loss = F.relu(target_var - pos_var) + F.relu(target_var - neg_var)
+        else:
+            variance_loss = torch.tensor(0.0, device=logits.device)
+        
+        # Combine
+        total_loss = (
+            (1.0 - self.ranking_weight - self.variance_weight) * bce_loss +
+            self.ranking_weight * ranking_loss +
+            self.variance_weight * variance_loss
+        )
+        
+        return total_loss
+
+
 def get_loss_function(loss_type: str = 'standard_bce', **kwargs):
     """
     Factory function to get a loss function.
@@ -490,6 +597,7 @@ def get_loss_function(loss_type: str = 'standard_bce', **kwargs):
             - 'pu': Positive-Unlabeled learning loss (theoretical)
             - 'balanced_focal': Balanced focal loss (combination)
             - 'ranking_aware_bce': Ranking-aware BCE loss (avoids score compression)
+            - 'grouped_ranking_bce': Grouped ranking-aware BCE loss (avoids score compression)
         **kwargs: Additional arguments for the loss function
         
     Returns:
@@ -507,6 +615,7 @@ def get_loss_function(loss_type: str = 'standard_bce', **kwargs):
         'pu': ['prior', 'beta'],
         'balanced_focal': ['alpha', 'gamma', 'pos_weight'],
         'ranking_aware_bce': ['pos_weight', 'margin', 'ranking_weight', 'variance_weight'],
+        'grouped_ranking_bce': ['pos_weight', 'margin', 'ranking_weight', 'variance_weight'],
     }
     
     if loss_type not in loss_param_mapping:
@@ -525,6 +634,7 @@ def get_loss_function(loss_type: str = 'standard_bce', **kwargs):
         'pu': lambda: PULoss(**filtered_kwargs),
         'balanced_focal': lambda: BalancedFocalLoss(**filtered_kwargs),
         'ranking_aware_bce': lambda: RankingAwareBCELoss(**filtered_kwargs),
+        'grouped_ranking_bce': lambda: GroupedRankingAwareLoss(**filtered_kwargs),
     }
     
     return loss_functions[loss_type]()

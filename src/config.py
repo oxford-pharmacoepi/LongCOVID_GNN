@@ -34,7 +34,7 @@ class Config:
         }
         
         # Loss function configuration
-        self.loss_function = 'ranking_aware_bce'  # Options: standard_bce (default), weighted_bce, focal, pu, confidence_weighted, balanced_focal, ranking_aware_bce
+        self.loss_function = 'grouped_ranking_bce' # Options: standard_bce, weighted_bce, ranking_aware_bce, grouped_ranking_bce, focal, pu, confidence_weighted, balanced_focal
         self.loss_params = {
             'pos_weight': None,              # Auto-computed if None
             'neg_weight': 1.0,
@@ -53,27 +53,58 @@ class Config:
         self.recall_k = 100  # K value for Recall@K (used when primary_metric is "recall@k")
         self.ranking_k_values = [10, 50, 100, 200, 500]  # K values to compute for all ranking metrics
         
+        # Bayesian optimisation settings
+        self.optimization_config = {
+            'metric': 'hits_at_20',               # Options: 'apr', 'hits_at_20', 'hits_at_50', 'mrr'
+            'use_loo_validation': True,           # If True, optimise using LOO validation instead of test set
+            'loo_validation_diseases': [          # Diseases for LOO-based optimisation (if enabled)
+                'EFO_0003854',                    # Osteoporosis
+                'MONDO_0008383',                  # Rheumatoid Arthritis
+                'MONDO_0005011',                  # Crohn's Disease  
+                'EFO_0000676',                    # Psoriasis
+                'MONDO_0005301',                  # Multiple Sclerosis
+            ],
+            'loo_k': 20,                          # K for Hits@K in LOO validation
+        }
+        
+        # Data enrichment options
+        self.data_enrichment = {
+            'use_gene_disease_scores': True,      # Use association scores as gene-disease edge weights
+            'use_drug_warnings': False,           # Add drug toxicity as node features (requires drugWarnings data)
+        }
+        
         # Model selection
-        self.model_choice = 'Transformer'  # Options: 'all', 'Transformer', 'GCN', 'SAGE'
+        self.model_choice = 'SAGE'  # Options: 'all', 'Transformer', 'GCN', 'SAGE', 'HGT'
 
         # Model hyperparameters
         self.model_config = {
-            'learning_rate': 0.0015456417318475437,
-            'weight_decay': 2.7189746426884763e-06,
-            'hidden_channels': 64,
-            'out_channels': 32,
-            'num_layers': 2,
-            'dropout_rate': 0.4870800162873122,
+            'in_channels': None,      # Auto-inferred
+            'hidden_channels': 64,    # Embeddings dimension
+            'out_channels': 32,       # Output dimension
+            'num_layers': 1,          # Default to 1 layer for stability
+            'dropout_rate': 0.5,
+            'heads': 4,               # For Transformer/GAT
+            'concat': True,           # For Transformer/GAT
             'num_epochs': 200,
-            'patience': 50,
-            'heads': 2,
-            'concat': True,
-            'batch_size': 2048
+            'lr': 0.001,
+            'weight_decay': 1e-5,
+            'batch_size': 1024,
+            'decoder_type': 'mlp_neighbor',
+            'use_heuristics': True,
         }
         
         # Training settings
         self.seed = 42
-        self.device = 'cuda' if self._is_cuda_available() else 'cpu'
+        try:
+            import torch
+            if torch.cuda.is_available():
+                self.device = 'cuda'
+            elif torch.backends.mps.is_available():
+                self.device = 'mps'
+            else:
+                self.device = 'cpu'
+        except ImportError:
+            self.device = 'cpu'
         
         # Path configuration
         self._setup_paths()
@@ -125,6 +156,7 @@ class Config:
             'val_indication': f"{self.general_path}/{self.validation_version}/indication",
             'test_indication': f"{self.general_path}/{self.test_version}/indication",
             'molecule': f"{self.general_path}/{self.training_version}/molecule",
+            'drugWarnings': f"{self.general_path}/{self.training_version}/drugWarnings",
             'diseases': f"{self.general_path}/{self.training_version}/diseases", 
             'val_diseases': f"{self.general_path}/{self.validation_version}/diseases",
             'test_diseases': f"{self.general_path}/{self.test_version}/diseases", 
