@@ -770,16 +770,16 @@ class LeaveOneOutValidator:
         """
         Run LOO validation across diseases specified in config.
         
-        Uses config.optimization_config.loo_validation_diseases list.
+        Uses config.optimisation_config.loo_validation_diseases list.
         Returns aggregate metrics suitable for Bayesian optimization.
         """
         self.load_graph_data()
         
         # Get disease list from config
-        diseases = self.config.optimization_config.get('loo_validation_diseases', [])
+        diseases = self.config.optimisation_config.get('loo_validation_diseases', [])
         
         if not diseases:
-            print("No diseases specified in config.optimization_config.loo_validation_diseases")
+            print("No diseases specified in config.optimisation_config.loo_validation_diseases")
             return None
         
         print(f"\n{'='*80}")
@@ -1262,7 +1262,7 @@ def main():
     parser.add_argument('--top-diseases', type=int, default=0,
                         help='Number of top diseases (by connections) to validate automatically. Defaults to 5 if no target specified and no global options set.')
     parser.add_argument('--multi-disease', action='store_true',
-                        help='Run LOO validation across diseases defined in config.optimization_config.loo_validation_diseases')
+                        help='Run LOO validation across diseases defined in config.optimisation_config.loo_validation_diseases')
     parser.add_argument('--override-config', nargs='*', help='Override config values (key=value)')
     parser.add_argument("--layers", type=int, help="Number of GNN layers")
     parser.add_argument("--decoder-type", type=str, choices=['dot', 'mlp', 'mlp_interaction', 'mlp_neighbor'], 
@@ -1354,7 +1354,7 @@ def main():
     
     elif args.multi_disease:
         # 2. Run multi-disease LOO (diseases from config)
-        k = config.optimization_config.get('loo_k', 20)
+        k = config.optimisation_config.get('loo_k', 20)
         validator.validate_multi_disease(k=k)
         
     elif args.top_diseases > 0:

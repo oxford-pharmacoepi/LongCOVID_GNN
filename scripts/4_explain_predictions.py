@@ -103,7 +103,7 @@ def find_latest_predictions(results_dir='results'):
     return latest_predictions
 
 
-class LinkPredictor(nn.Module):
+class ExplainableLinkPredictor(nn.Module):
     """Wrapper to make GNN suitable for edge-level explanations."""
     
     def __init__(self, gnn):
@@ -165,7 +165,7 @@ class ExplanationCache:
         return f"Cache stats: {self.hits}/{total} hits ({hit_rate:.2%})"
 
 
-class GNNExplainerAnalyzer:
+class GNNExplainerAnalyser:
     """Main GNNExplainer implementation for drug-disease predictions."""
     
     def __init__(self, model, graph, device, config=None):
@@ -176,9 +176,9 @@ class GNNExplainerAnalyzer:
         self.cache = ExplanationCache()
         
         # Wrap model for edge-level predictions
-        self.link_predictor = LinkPredictor(model).to(device)
+        self.link_predictor = ExplainableLinkPredictor(model).to(device)
         
-        # Create explainer with optimized configuration
+        # Create explainer with optimised configuration
         self.explainer = Explainer(
             model=self.link_predictor,
             algorithm=GNNExplainer(epochs=self.config.get('epochs', 50)),
@@ -602,7 +602,7 @@ def calculate_type_importance_analysis(explanations_dict, graph, idx_to_type=Non
 
 def analyze_edge_types(explanations_dict, graph, idx_to_type=None):
     """
-    Analyze which edge types are most important in predictions.
+    Analyse which edge types are most important in predictions.
     Classifies edges by the types of nodes they connect.
     """
     print("\nEDGE TYPE ANALYSIS:")
@@ -680,7 +680,7 @@ def real_faithfulness_test(explanations_dict, model, graph, n_tests=50):
                          if v['has_explanation']]
     test_explanations = valid_explanations[:n_tests]
     
-    link_predictor = LinkPredictor(model)
+    link_predictor = ExplainableLinkPredictor(model)
     link_predictor.eval()
     
     # Check if graph has edge features
@@ -775,7 +775,7 @@ def real_faithfulness_test(explanations_dict, model, graph, n_tests=50):
     }
 
 
-def create_visualizations(results, output_dir):
+def create_visualisations(results, output_dir):
     """Create visualization plots."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1100,11 +1100,11 @@ def main():
         
         # Initialize GNNExplainer
         print("Initializing GNNExplainer...")
-        analyzer = GNNExplainerAnalyzer(model, graph, device, config=explainer_config)
+        analyser = GNNExplainerAnalyser(model, graph, device, config=explainer_config)
         
         # Generate explanations
         start_time = time.time()
-        explanations_dict = analyzer.explain_multiple_predictions(
+        explanations_dict = analyser.explain_multiple_predictions(
             fp_pairs, 
             max_explanations=args.max_explanations
         )
@@ -1166,7 +1166,7 @@ def main():
                 tracker.log_metric(f'edge_importance_{safe_edge_type}_count', stats['count'])
         
         # Save and visualize
-        create_visualizations(results, args.output_dir)
+        create_visualisations(results, args.output_dir)
         save_results(results, args.output_dir)
         
         # Log visualizations as artifacts

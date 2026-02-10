@@ -54,7 +54,7 @@ class Config:
         self.ranking_k_values = [10, 50, 100, 200, 500]  # K values to compute for all ranking metrics
         
         # Bayesian optimisation settings
-        self.optimization_config = {
+        self.optimisation_config = {
             'metric': 'hits_at_20',               # Options: 'apr', 'hits_at_20', 'hits_at_50', 'mrr'
             'use_loo_validation': True,           # If True, optimise using LOO validation instead of test set
             'loo_validation_diseases': [          # Diseases for LOO-based optimisation (if enabled)
@@ -74,7 +74,7 @@ class Config:
         }
         
         # Model selection
-        self.model_choice = 'SAGE'  # Options: 'all', 'Transformer', 'GCN', 'SAGE', 'HGT'
+        self.model_choice = 'SAGE'  # Options: 'all', 'Transformer', 'GCN', 'SAGE'
 
         # Model hyperparameters
         self.model_config = {

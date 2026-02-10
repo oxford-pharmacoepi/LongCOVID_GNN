@@ -93,7 +93,7 @@ class ModelEvaluator:
             print(f"MLflow tracking enabled: {experiment_name}")
         
     def _create_results_structure(self):
-        """Create organized results directory structure."""
+        """Create organised results directory structure."""
         subdirs = {
             'evaluation': 'evaluation',
             'predictions': 'predictions',
