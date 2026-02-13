@@ -226,7 +226,7 @@ def train_seal_leave_one_out(
     print("-" * 60)
     for rank, (drug_idx, score) in enumerate(drug_scores[:20], 1):
         drug_id = idx_to_drug.get(drug_idx, "Unknown")
-        mark = "✓ True" if drug_idx in true_drugs else ""
+        mark = "True" if drug_idx in true_drugs else ""
         print(f"{rank:<6} {drug_id:<20} {score:<10.4f} {mark}")
 
     n = len(true_drugs)

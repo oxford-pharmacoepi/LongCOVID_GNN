@@ -16,7 +16,7 @@ class GraphEdgeBuilder:
     
     def __init__(self, config, processor):
         """
-        Initialize edge builder.
+        Initialise edge builder.
         
         Args:
             config: Configuration object

@@ -24,7 +24,7 @@ class GCNModel(torch.nn.Module):
             [GCNConv(hidden_channels, hidden_channels) for _ in range(num_layers - 1)]
         )
 
-        # Layer normalization and dropout
+        # Layer normalisation and dropout
         self.ln = torch.nn.LayerNorm(hidden_channels)
         self.dropout = torch.nn.Dropout(p=dropout_rate)
 
@@ -85,7 +85,7 @@ class TransformerModel(torch.nn.Module):
             [TransformerConv(head_out_channels, hidden_channels, heads=heads, concat=concat, edge_dim=edge_dim) for _ in range(num_layers - 1)]
         )
 
-        # Layer normalization and dropout
+        # Layer normalisation and dropout
         self.ln = torch.nn.LayerNorm(head_out_channels)
         self.dropout = torch.nn.Dropout(p=dropout_rate)
 
@@ -145,16 +145,16 @@ class SAGEModel(torch.nn.Module):
         # Final output layer with proper initialisation
         self.final_layer = torch.nn.Linear(hidden_channels, out_channels)
         
-        # Initialize weights properly to prevent gradient explosion
+        # Initialise weights properly to prevent gradient explosion
         self._init_weights()
     
     def _init_weights(self):
-        """Initialize weights with smaller values for stability."""
+        """Initialise weights with smaller values for stability."""
         for conv in [self.conv1] + list(self.conv_list):
             if hasattr(conv, 'reset_parameters'):
                 conv.reset_parameters()
         
-        # Initialize final layer with small weights
+        # Initialise final layer with small weights
         nn.init.xavier_uniform_(self.final_layer.weight, gain=0.1)
         nn.init.zeros_(self.final_layer.bias)
 
@@ -211,7 +211,7 @@ class GATModel(torch.nn.Module):
             [GATConv(head_out_channels, hidden_channels, heads=heads, concat=concat, edge_dim=edge_dim, dropout=dropout_rate) for _ in range(num_layers - 1)]
         )
 
-        # Layer normalization and dropout
+        # Layer normalisation and dropout
         self.ln = torch.nn.LayerNorm(head_out_channels)
         self.dropout = torch.nn.Dropout(p=dropout_rate)
 

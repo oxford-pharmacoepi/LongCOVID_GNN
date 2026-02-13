@@ -23,11 +23,11 @@ class GraphBuilder:
     """Main graph builder using modular components."""
     
     def __init__(self, config, force_mode=None, tracker=None):
-        """Initialize graph builder with components."""
+        """Initialise graph builder with components."""
         self.config = config
         self.tracker = tracker
         
-        # Initialize components
+        # Initialise components
         self.processor = DataProcessor(config)
         self.data_mode = detect_data_mode(config, force_mode)
         

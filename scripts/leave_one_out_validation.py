@@ -425,7 +425,7 @@ class LeaveOneOutValidator:
         # Optimiser from config
         lr = self.config.model_config.get('learning_rate', 0.001)
         weight_decay = self.config.model_config.get('weight_decay', 1e-5)
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
+        optimiser = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
         
         # Loss from config
         loss_config = self.config.get_loss_config()
@@ -460,7 +460,7 @@ class LeaveOneOutValidator:
         pbar = tqdm(range(self.epochs_per_fold), desc="Training", leave=False)
         for epoch in pbar:
             model.train() # Ensure train mode
-            optimizer.zero_grad()
+            optimiser.zero_grad()
             
             # Forward pass
             edge_attr = getattr(graph, 'edge_attr', None)
@@ -481,7 +481,7 @@ class LeaveOneOutValidator:
             
             # Backward pass
             loss.backward()
-            optimizer.step()
+            optimiser.step()
             
             current_loss = loss.item()
             pbar.set_postfix({'loss': f"{current_loss:.4f}"})

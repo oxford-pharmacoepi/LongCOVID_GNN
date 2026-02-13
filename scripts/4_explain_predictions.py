@@ -1198,7 +1198,7 @@ def main():
                 tracker.log_metric(f'edge_importance_{safe_edge_type}_mean', stats['mean'])
                 tracker.log_metric(f'edge_importance_{safe_edge_type}_count', stats['count'])
         
-        # Save and visualize
+        # Save and visualise
         create_visualisations(results, args.output_dir)
         save_results(results, args.output_dir)
         

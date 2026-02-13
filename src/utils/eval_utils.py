@@ -212,7 +212,7 @@ def calculate_precision_at_k(y_true, y_prob, k_values=[10, 50, 100, 200, 500]):
 
 
 def calculate_ndcg_at_k(y_true, y_prob, k_values=[10, 50, 100, 200, 500]):
-    """Calculate Normalized Discounted Cumulative Gain (NDCG@K)."""
+    """Calculate Normalised Discounted Cumulative Gain (NDCG@K)."""
     ndcg_at_k = {}
     for k in k_values:
         try:

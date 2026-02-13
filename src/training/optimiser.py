@@ -394,7 +394,7 @@ class BayesianOptimiser:
             Dictionary with best hyperparameters and results
         """
         print(f"\n{'='*80}")
-        print(f"Starting Bayesian Hyperparameter Optimization")
+        print(f"Starting Bayesian Hyperparameter Optimisation")
         print(f"{'='*80}")
         print(f"Study: {self.study_name}")
         print(f"Trials: {self.n_trials}")

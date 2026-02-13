@@ -28,6 +28,11 @@ from src.utils.eval_utils import calculate_metrics
 from src.utils.edge_utils import generate_pairs
 from src.config import get_config, create_custom_config
 from src.training.tracker import ExperimentTracker
+from src.training.losses import get_loss_function
+try:
+    from src.bayesian_optimiser import BayesianOptimiser
+except ImportError:
+    BayesianOptimiser = None
 
 
 def find_latest_graph(results_dir='results'):
@@ -238,14 +243,13 @@ class ModelTrainer:
             lr = lr * 0.1  # 10x lower learning rate for SAGE
             print(f"Using reduced learning rate for SAGE: {lr:.6f}")
         
-        optimizer = torch.optim.Adam(
+        optimiser = torch.optim.Adam(
             model.parameters(), 
             lr=lr,
             weight_decay=self.model_config.get('weight_decay', 0.0)
         )
         
         # Get loss function from config
-        from src.training.losses import get_loss_function
         loss_config = self.config.get_loss_config()
         loss_function = get_loss_function(
             loss_type=loss_config['loss_function'],
@@ -291,7 +295,6 @@ class ModelTrainer:
         print(f"Training for {self.model_config['num_epochs']} epochs with patience {self.model_config['patience']}")
         
         # Use tqdm with explicit settings for better compatibility
-        import sys
         for epoch in tqdm(range(self.model_config['num_epochs']), 
                          desc=f'Training {model_name}',
                          file=sys.stdout,
@@ -299,7 +302,7 @@ class ModelTrainer:
                          mininterval=1.0):
             # Training phase
             model.train()
-            optimizer.zero_grad()
+            optimiser.zero_grad()
             
             # Forward pass with edge features if available
             if has_edge_attr:
@@ -326,7 +329,7 @@ class ModelTrainer:
             # Backpropagation
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            optimiser.step()
             
             train_losses.append(loss.item())
             
@@ -846,15 +849,18 @@ def main():
         print(f"Running optimisation with {args.n_trials} trials before training...")
         print("="*80 + "\n")
         
+        if BayesianOptimiser is None:
+            print("ERROR: Bayesian optimiser not available. Please install optuna:")
+            print("  pip install optuna>=3.5.0")
+            return None
+        
         try:
-            from src.bayesian_optimiser import BayesianOptimiser
-            
             # Load graph for optimisation
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             graph = torch.load(args.graph, map_location=device, weights_only=False)
             
             # Run optimisation
-            optimiser = BayesianOptimiser(
+            optimiser_engine = BayesianOptimiser(
                 graph=graph,
                 config=config,
                 n_trials=args.n_trials,
@@ -863,7 +869,7 @@ def main():
                 results_dir=os.path.join(args.output_dir, 'bayesian_optimisation')
             )
             
-            results = optimiser.optimise()
+            results = optimiser_engine.optimise()
             
             # Apply best hyperparameters to config
             best_params = results['best_params']
@@ -895,12 +901,10 @@ def main():
             
             print(f"Optimised config saved to: {opt_config_path}\n")
             
-        except ImportError:
-            print("ERROR: Bayesian optimiser not available. Please install optuna:")
-            print("  pip install optuna>=3.5.0")
-            return None
         except Exception as e:
             print(f"ERROR during optimisation: {e}")
+            import traceback
+            traceback.print_exc()
             print("Continuing with default hyperparameters...")
     
     # Print config to verify it's correct

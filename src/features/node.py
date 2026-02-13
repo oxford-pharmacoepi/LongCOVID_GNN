@@ -12,7 +12,7 @@ class NodeFeatureBuilder:
     
     def __init__(self, config, processor):
         """
-        Initialize feature builder.
+        Initialise feature builder.
         
         Args:
             config: Configuration object

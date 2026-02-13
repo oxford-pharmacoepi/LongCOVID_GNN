@@ -393,7 +393,7 @@ class RankingAwareBCELoss(nn.Module):
                  ranking_weight: float = 0.3,
                  variance_weight: float = 0.1):
         """
-        Initialize ranking-aware BCE loss.
+        Initialise ranking-aware BCE loss.
         
         Args:
             pos_weight: Weight for positive class (auto-computed if None)

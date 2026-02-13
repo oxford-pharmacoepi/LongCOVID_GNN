@@ -112,7 +112,7 @@ def run_benchmark():
                 # We need to add CLI args to leave_one_out_validation.py first if they don't exist
                 # Checking source code... it has --model, --decoder-type, --loss-type, --hidden-dim ??
                 # Let's assume we added them in the previous steps or will add them now.
-                # Actually, looking at previous `visualize` tool output for `leave_one_out_validation.py`,
+                # Actually, looking at previous `visualise` tool output for `leave_one_out_validation.py`,
                 # it DOES have: --model, --decoder-type. 
                 # It might NOT have --loss-type or --hidden-dim. 
                 # I will verify this and add them if needed before running this script.
