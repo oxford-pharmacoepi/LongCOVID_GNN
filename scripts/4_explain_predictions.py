@@ -977,7 +977,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     
-    # Initialize MLflow tracking
+    # Initialise MLflow tracking
     tracker = ExperimentTracker(
         experiment_name="GNN_Explainer_Analysis",
         tracking_uri="./mlruns"
@@ -1054,14 +1054,13 @@ def main():
                     edge_dim=edge_dim
                 ).to(device)
             else:
-                # For other models, pass edge_dim if they support it
+                # GCN and SAGE don't support edge_dim parameter
                 model = model_class(
                     in_channels=graph.x.size(1),
                     hidden_channels=model_config['hidden_channels'],
                     out_channels=model_config['out_channels'],
                     num_layers=model_config['num_layers'],
-                    dropout_rate=model_config['dropout_rate'],
-                    edge_dim=edge_dim
+                    dropout_rate=model_config['dropout_rate']
                 ).to(device)
         else:
             print("  Note: No edge features found")
@@ -1073,7 +1072,41 @@ def main():
                 dropout_rate=model_config['dropout_rate']
             ).to(device)
         
-        model.load_state_dict(torch.load(model_path, map_location=device, weights_only=False))
+        # Try to load model - handle both old (LinkPredictor-wrapped) and new (direct) formats
+        checkpoint = torch.load(model_path, map_location=device, weights_only=False)
+        
+        try:
+            # Try loading directly (new format)
+            model.load_state_dict(checkpoint)
+            print("  Loaded model (direct format)")
+        except (RuntimeError, KeyError) as e:
+            # If direct loading fails, try loading as LinkPredictor wrapper (old format)
+            print(f"  Note: Direct loading failed, trying LinkPredictor format...")
+            try:
+                from src.models import LinkPredictor
+                
+                # Create LinkPredictor wrapper
+                link_predictor = LinkPredictor(
+                    encoder=model,
+                    hidden_channels=model_config['out_channels'],
+                    decoder_type='mlp_heuristic'
+                ).to(device)
+                
+                # Load full LinkPredictor state
+                link_predictor.load_state_dict(checkpoint)
+                
+                # Extract just the encoder for testing
+                model = link_predictor.encoder
+                print("  Loaded model (LinkPredictor wrapper format, extracted encoder)")
+                
+            except Exception as e2:
+                raise RuntimeError(
+                    f"Failed to load model from {model_path}. "
+                    f"Tried both direct format and LinkPredictor wrapper format. "
+                    f"Direct error: {str(e)[:100]}. "
+                    f"Wrapper error: {str(e2)[:100]}"
+                )
+        
         model.eval()
         print("Model loaded successfully")
         
@@ -1098,8 +1131,8 @@ def main():
         print(f"Loaded {len(fp_pairs)} false positive predictions")
         tracker.log_metric('num_fp_predictions', len(fp_pairs))
         
-        # Initialize GNNExplainer
-        print("Initializing GNNExplainer...")
+        # Initialise GNNExplainer
+        print("Initialising GNNExplainer...")
         analyser = GNNExplainerAnalyser(model, graph, device, config=explainer_config)
         
         # Generate explanations

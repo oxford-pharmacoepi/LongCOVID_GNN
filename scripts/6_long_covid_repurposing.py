@@ -541,7 +541,6 @@ class LongCOVIDDrugRepurposing:
             edge_dim = self.graph.edge_attr.size(1)
             
             # For TransformerModel, pass edge_dim to constructor
-            # For TransformerModel, pass edge_dim to constructor
             if model_name == 'Transformer':
                 encoder_instance = model_class(
                     in_channels=self.graph.x.shape[1],
@@ -552,14 +551,13 @@ class LongCOVIDDrugRepurposing:
                     edge_dim=edge_dim
                 )
             else:
-                # For other models, pass edge_dim if they support it
+                # GCN and SAGE don't support edge_dim parameter
                 encoder_instance = model_class(
                     in_channels=self.graph.x.shape[1],
                     hidden_channels=model_config['hidden_channels'],
                     out_channels=model_config['out_channels'],
                     num_layers=model_config['num_layers'],
-                    dropout_rate=model_config['dropout_rate'],
-                    edge_dim=edge_dim
+                    dropout_rate=model_config['dropout_rate']
                 )
         else:
             print("  Note: No edge features found")

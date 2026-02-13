@@ -49,7 +49,7 @@ class Config:
         }
         
         # Evaluation settings
-        self.primary_metric = 'apr'  # "auc", "apr", "f1", "accuracy", "recall@k", "precision@k"
+        self.primary_metric = 'hits_at_20'  # "auc", "apr", "f1", "accuracy", "hits_at_k", "recall@k", "precision@k"
         self.recall_k = 100  # K value for Recall@K (used when primary_metric is "recall@k")
         self.ranking_k_values = [10, 50, 100, 200, 500]  # K values to compute for all ranking metrics
         
@@ -74,7 +74,7 @@ class Config:
         }
         
         # Model selection
-        self.model_choice = 'SAGE'  # Options: 'all', 'Transformer', 'GCN', 'SAGE'
+        self.model_choice = 'Transformer'  # Options: 'all', 'Transformer', 'GCN', 'SAGE', 'GATModel'
 
         # Model hyperparameters
         self.model_config = {
@@ -83,10 +83,11 @@ class Config:
             'out_channels': 32,       # Output dimension
             'num_layers': 1,          # Default to 1 layer for stability
             'dropout_rate': 0.5,
-            'heads': 4,               # For Transformer/GAT
+            'heads': 4,               # For Transformer/GATModel
             'concat': True,           # For Transformer/GAT
             'num_epochs': 200,
             'lr': 0.001,
+            'patience': 20,           # Early stopping patience
             'weight_decay': 1e-5,
             'batch_size': 1024,
             'decoder_type': 'mlp_neighbor',

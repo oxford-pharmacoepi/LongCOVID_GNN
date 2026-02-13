@@ -190,43 +190,24 @@ class ModelTrainer:
         
         # ------------------------------------------------------------------
         
-        # Log model-specific parameters to MLflow
-        if self.tracker:
-            self.tracker.log_param(f"{model_name}_architecture", model_class.__name__)
-            self.tracker.log_param(f"{model_name}_hidden_channels", self.model_config['hidden_channels'])
-            self.tracker.log_param(f"{model_name}_num_layers", self.model_config['num_layers'])
-            self.tracker.log_param(f"{model_name}_dropout", self.model_config['dropout_rate'])
-            self.tracker.log_param(f"{model_name}_primary_metric", primary_metric)
-        
-        # Check if graph has edge features
+        # ------------------------------------------------------------------
+        # Phase 2: Initialise Encoder and LinkPredictor
+        # ------------------------------------------------------------------
+        # Determine if we need edge dimensions for the encoder
         has_edge_attr = hasattr(graph, 'edge_attr') and graph.edge_attr is not None
-        if has_edge_attr:
-            print(f"✓ Using edge features: {graph.edge_attr.shape}")
-            edge_attr = graph.edge_attr.float()
-            
-            # For TransformerModel, pass edge_dim to constructor
-            if model_name == 'TransformerModel':
-                edge_dim = graph.edge_attr.size(1)
-                model = model_class(
-                    in_channels=graph.x.size(1),
-                    hidden_channels=self.model_config['hidden_channels'],
-                    out_channels=self.model_config['out_channels'],
-                    num_layers=self.model_config['num_layers'],
-                    dropout_rate=self.model_config['dropout_rate'],
-                    edge_dim=edge_dim
-                ).to(self.device)
-            else:
-                model = model_class(
-                    in_channels=graph.x.size(1),
-                    hidden_channels=self.model_config['hidden_channels'],
-                    out_channels=self.model_config['out_channels'],
-                    num_layers=self.model_config['num_layers'],
-                    dropout_rate=self.model_config['dropout_rate']
-                ).to(self.device)
+        edge_dim = graph.edge_attr.size(1) if has_edge_attr else None
+        
+        # Initialise Encoder
+        if model_name in ['TransformerModel', 'GATModel']:
+            encoder = model_class(
+                in_channels=graph.x.size(1),
+                hidden_channels=self.model_config['hidden_channels'],
+                out_channels=self.model_config['out_channels'],
+                num_layers=self.model_config['num_layers'],
+                dropout_rate=self.model_config['dropout_rate'],
+                edge_dim=edge_dim
+            )
         else:
-            print("  Note: No edge features found")
-            edge_attr = None
-            # Initialise model (Encoder)
             encoder = model_class(
                 in_channels=graph.x.size(1),
                 hidden_channels=self.model_config['hidden_channels'],
@@ -235,15 +216,24 @@ class ModelTrainer:
                 dropout_rate=self.model_config['dropout_rate']
             )
             
-            # Wrap in LinkPredictor with learned heuristic decoder
-            model = LinkPredictor(
-                encoder=encoder,
-                hidden_channels=self.model_config['out_channels'],
-                decoder_type='mlp_heuristic'  # GNN learns to weight heuristics fairly
-            ).to(self.device)
+        # Wrap in LinkPredictor
+        # Use 'mlp_neighbor' or 'mlp_interaction' based on config
+        decoder_type = self.model_config.get('decoder_type', 'mlp_neighbor')
+        
+        model = LinkPredictor(
+            encoder=encoder,
+            hidden_channels=self.model_config['out_channels'],
+            decoder_type=decoder_type
+        ).to(self.device)
+        
+        if has_edge_attr:
+            print(f" Using edge features with {model_name} (edge_dim={edge_dim})")
+            edge_attr = graph.edge_attr.float()
+        else:
+            edge_attr = None
         
         # Use lower learning rate for SAGE model (more stable)
-        lr = self.model_config['learning_rate']
+        lr = self.model_config.get('lr', 0.001)
         if model_name == 'SAGEModel':
             lr = lr * 0.1  # 10x lower learning rate for SAGE
             print(f"Using reduced learning rate for SAGE: {lr:.6f}")
@@ -285,7 +275,7 @@ class ModelTrainer:
         
         # Training tracking - track both loss and primary metric
         best_val_loss = float('inf')
-        best_val_metric = 0.0  # For AUC, APR, F1, etc. (higher is better)
+        best_val_metric = -1.0  # For AUC, APR, F1, etc. (higher is better)
         counter = 0
         best_threshold = 0.5
         train_losses = []
@@ -372,12 +362,24 @@ class ModelTrainer:
                     )
                     
                     # Get the primary metric value
-                    # Handle recall@k specially by extracting from ranking metrics
-                    if primary_metric.startswith('recall@'):
-                        k_value = self.config.recall_k if hasattr(self.config, 'recall_k') else 100
-                        current_metric = val_metrics.get('ranking_metrics', {}).get(f'recall@{k_value}', 0.0)
+                    # We use recall@k as a more sensitive optimisation proxy if hits_at_k is requested.
+                    pm_lower = primary_metric.lower()
+                    if pm_lower.startswith('hits_at_'):
+                        k_val = pm_lower.split('_')[-1]
+                        eval_metric = f'recall@{k_val}'
+                        print(f"  Note: Using {eval_metric} instead of {pm_lower} for more sensitive optimisation")
                     else:
-                        current_metric = val_metrics.get(primary_metric, 0.0)
+                        eval_metric = pm_lower
+
+                    current_metric = val_metrics.get(eval_metric)
+                    if current_metric is None:
+                        # Try mapping hits_at_20 to hits@20 or vice versa
+                        alt_metric = eval_metric.replace('_at_', '@') if '_at_' in eval_metric else eval_metric.replace('@', '_at_')
+                        current_metric = val_metrics.get(alt_metric)
+                    
+                    if current_metric is None:
+                        # Final fallback
+                        current_metric = val_metrics.get(pm_lower, 0.0)
                     
                     val_threshold = val_probs.mean().item()
                     
@@ -394,7 +396,7 @@ class ModelTrainer:
                         )
                     
                     # Check for improvement based on primary metric
-                    if current_metric > best_val_metric:
+                    if current_metric >= best_val_metric:
                         best_val_loss = val_loss.item()
                         best_val_metric = current_metric
                         best_threshold = val_threshold
@@ -822,6 +824,18 @@ def main():
     # Load configuration from config.py (freshly reloaded)
     config = get_config()
     
+    # Set model choice for training (overrides config default)
+    if args.model != 'all':
+        config.model_choice = args.model
+        
+    # Set epochs for training (overrides config default)
+    if args.epochs:
+        config.model_config['num_epochs'] = args.epochs
+        
+    # Set output directory
+    if args.output_dir:
+        config.results_path = args.output_dir
+    
     # Bayesian Optimisation (if requested)
     if args.optimise_first:
         print("\n" + "="*80)
@@ -836,10 +850,6 @@ def main():
             # Load graph for optimisation
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             graph = torch.load(args.graph, map_location=device, weights_only=False)
-            
-            # Set model choice for optimisation
-            if args.model != 'all':
-                config.model_choice = args.model
             
             # Run optimisation
             optimiser = BayesianOptimiser(
@@ -913,7 +923,7 @@ def main():
     # Set reproducibility
     enable_full_reproducibility(config.seed)  
     
-    # Initialize MLflow tracker
+    # Initialise MLflow tracker
     tracker = ExperimentTracker(experiment_name='model_training')
     timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
     run_name = f"training_{timestamp}"
@@ -935,7 +945,7 @@ def main():
         # Auto-detect graph if not provided
         graph_path = args.graph or find_latest_graph()
         
-        # Initialize trainer
+        # Initialise trainer
         trainer = ModelTrainer(config, tracker)
         
         # Train models

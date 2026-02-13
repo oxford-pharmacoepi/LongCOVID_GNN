@@ -84,7 +84,7 @@ class ModelEvaluator:
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.results_dirs = self._create_results_structure()
         
-        # Initialize MLflow tracker
+        # Initialise MLflow tracker
         self.use_mlflow = use_mlflow
         self.mlflow_tracker = None
         if use_mlflow:
@@ -115,15 +115,20 @@ class ModelEvaluator:
         """Load information about trained models, respecting model_choice config."""
         trained_models = {}
         
-        # Get model_choice from config if available
+        # Check if a specific model file was provided
+        is_single_file = os.path.isfile(models_path)
+        
+        # Get model_choice from config if available (only used when scanning directory)
         model_choice = None
-        if config:
+        if config and not is_single_file:
+            # Only respect model_choice when scanning a directory
+            # If user specifies a specific model file, use it regardless of config
             model_choice = getattr(config, 'model_choice', None)
             if model_choice:
                 print(f"Config specifies model_choice: {model_choice}")
         
         # Look for model files
-        if os.path.isfile(models_path):
+        if is_single_file:
             # Single model file provided
             model_files = [models_path]
             models_dir = os.path.dirname(models_path)
@@ -170,7 +175,8 @@ class ModelEvaluator:
                 continue
             
             # Check if this model matches model_choice (if specified)
-            if model_choice:
+            # Only filter if we're scanning a directory
+            if model_choice and not is_single_file:
                 # Normalise model_choice to match model_name format
                 if model_choice.lower() == 'gcn' and model_name != 'GCNModel':
                     continue
@@ -187,7 +193,7 @@ class ModelEvaluator:
             found_model_types.add(model_name)
             print(f"Selected {model_name}: {filename}")
         
-        if model_choice and not trained_models:
+        if model_choice and not trained_models and not is_single_file:
             print(f"Warning: model_choice '{model_choice}' specified but no matching model found in {models_dir}")
         
         return trained_models
@@ -287,8 +293,44 @@ class ModelEvaluator:
                 dropout_rate=model_config['dropout_rate']
             ).to(self.device)
         
-        model.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=False))
+        # Try to load model - handle both old (LinkPredictor-wrapped) and new (direct) formats
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+        
+        try:
+            # Try loading directly (new format)
+            model.load_state_dict(checkpoint)
+            print("  Loaded model (direct format)")
+        except (RuntimeError, KeyError) as e:
+            # If direct loading fails, try loading as LinkPredictor wrapper (old format)
+            print(f"  Note: Direct loading failed, trying LinkPredictor format...")
+            try:
+                from src.models import LinkPredictor
+                
+                # Create LinkPredictor wrapper
+                link_predictor = LinkPredictor(
+                    encoder=model,
+                    hidden_channels=model_config['out_channels'],
+                    decoder_type='mlp_heuristic'
+                ).to(self.device)
+                
+                # Load full LinkPredictor state
+                link_predictor.load_state_dict(checkpoint)
+                
+                # Extract just the encoder for testing
+                # (decoder not needed for embedding generation)
+                model = link_predictor.encoder
+                print("  Loaded model (LinkPredictor wrapper format, extracted encoder)")
+                
+            except Exception as e2:
+                raise RuntimeError(
+                    f"Failed to load model from {model_path}. "
+                    f"Tried both direct format and LinkPredictor wrapper format. "
+                    f"Direct error: {str(e)[:100]}. "
+                    f"Wrapper error: {str(e2)[:100]}"
+                )
+        
         model.eval()
+
         
         # Move data to device
         graph = graph.to(self.device)
@@ -376,7 +418,7 @@ class ModelEvaluator:
                 
                 # Add realistic deployment evaluation
                 deployment_metrics = self._evaluate_deployment_scenario(
-                    model_info, graph, config, num_diseases=10
+                    results['model'], graph, config, num_diseases=10
                 )
                 results['deployment_metrics'] = deployment_metrics
                 
@@ -435,6 +477,15 @@ class ModelEvaluator:
                 if 'recall' in ci_results:
                     ci = ci_results['recall']
                     print(f"       (95% CI: [{ci['ci_lower']:.4f}, {ci['ci_upper']:.4f}])")
+
+                # Print ranking metrics
+                ranking = metrics.get('ranking_metrics', {})
+                if ranking:
+                    print("\nRanking Metrics:")
+                    if 'hits_at_10' in ranking: print(f"  Hits@10: {ranking['hits_at_10']:.4f}")
+                    if 'hits_at_20' in ranking: print(f"  Hits@20: {ranking['hits_at_20']:.4f}")
+                    if 'hits_at_100' in ranking: print(f"  Hits@100: {ranking['hits_at_100']:.4f}")
+                    if 'recall@100' in ranking: print(f"  Recall@100: {ranking['recall@100']:.4f}")
                 
                 # End MLflow run for this model
                 if self.mlflow_tracker:
@@ -448,7 +499,7 @@ class ModelEvaluator:
         
         return test_results
     
-    def _evaluate_deployment_scenario(self, model_info, graph, config, num_diseases=10, top_k_values=[50, 100, 200]):
+    def _evaluate_deployment_scenario(self, model, graph, config, num_diseases=10, top_k_values=[50, 100, 200]):
         """
         Evaluate model in realistic deployment scenario.
         
@@ -462,49 +513,13 @@ class ModelEvaluator:
         print(f"Reporting: Recall@K for K={top_k_values}")
         print("="*80)
         
-        model_path = model_info['model_path']
-        model_class = model_info['model_class']
-        
         # Check if graph has edge features
         has_edge_attr = hasattr(graph, 'edge_attr') and graph.edge_attr is not None
         if has_edge_attr:
             edge_attr = graph.edge_attr.float()
-            
-            # For TransformerModel, pass edge_dim to constructor
-            model_name = model_class.__name__
-            if model_name == 'TransformerModel':
-                edge_dim = graph.edge_attr.size(1)
-                model_config = config.get_model_config()
-                model = model_class(
-                    in_channels=graph.x.size(1),
-                    hidden_channels=model_config['hidden_channels'],
-                    out_channels=model_config['out_channels'],
-                    num_layers=model_config['num_layers'],
-                    dropout_rate=model_config['dropout_rate'],
-                    edge_dim=edge_dim
-                ).to(self.device)
-            else:
-                model_config = config.get_model_config()
-                model = model_class(
-                    in_channels=graph.x.size(1),
-                    hidden_channels=model_config['hidden_channels'],
-                    out_channels=model_config['out_channels'],
-                    num_layers=model_config['num_layers'],
-                    dropout_rate=model_config['dropout_rate']
-                ).to(self.device)
         else:
             edge_attr = None
-            # Load model
-            model_config = config.get_model_config()
-            model = model_class(
-                in_channels=graph.x.size(1),
-                hidden_channels=model_config['hidden_channels'],
-                out_channels=model_config['out_channels'],
-                num_layers=model_config['num_layers'],
-                dropout_rate=model_config['dropout_rate']
-            ).to(self.device)
         
-        model.load_state_dict(torch.load(model_path, map_location=self.device, weights_only=False))
         model.eval()
         
         # Get drug-disease edges from test set
@@ -1072,7 +1087,7 @@ def main():
     # Set reproducibility
     enable_full_reproducibility(config.seed)
     
-    # Initialize evaluator (MLflow enabled by default unless --no-mlflow is passed)
+    # Initialise evaluator (MLflow enabled by default unless --no-mlflow is passed)
     evaluator = ModelEvaluator(
         results_path=args.results_path,
         use_mlflow=not args.no_mlflow,
