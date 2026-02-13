@@ -26,7 +26,7 @@ import random
 import glob
 
 # Import from shared modules
-from src.models import GCNModel, TransformerModel, SAGEModel, MODEL_CLASSES
+from src.models import GCNModel, TransformerModel, SAGEModel, GATModel, MODEL_CLASSES
 from src.config import get_config
 from src.utils.common import enable_full_reproducibility
 from src.utils.eval_utils import calculate_metrics

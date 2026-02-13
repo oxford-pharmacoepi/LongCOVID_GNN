@@ -21,7 +21,7 @@ from tqdm import tqdm
 import glob
 
 # Import from shared modules
-from src.models import GCNModel, TransformerModel, SAGEModel, MODEL_CLASSES, LinkPredictor
+from src.models import GCNModel, TransformerModel, SAGEModel, GATModel, MODEL_CLASSES, LinkPredictor
 from src.features.heuristic_scores import compute_heuristic_edge_features
 from src.utils.common import set_seed, enable_full_reproducibility
 from src.utils.eval_utils import calculate_metrics
@@ -593,7 +593,8 @@ class ModelTrainer:
         all_models = {
             'GCNModel': GCNModel,
             'TransformerModel': TransformerModel,
-            'SAGEModel': SAGEModel
+            'SAGEModel': SAGEModel,
+            'GATModel': GATModel
         }
         
         # Determine which models to train based on --model argument
@@ -606,7 +607,8 @@ class ModelTrainer:
                 'SAGE': 'SAGEModel',
                 'GCNModel': 'GCNModel',
                 'TransformerModel': 'TransformerModel',
-                'SAGEModel': 'SAGEModel'
+                'SAGEModel': 'SAGEModel',
+                'GATModel': 'GATModel'
             }
             model_name = model_map.get(model_choice, 'TransformerModel')
             models_to_train = {model_name: all_models[model_name]}

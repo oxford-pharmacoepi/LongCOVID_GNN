@@ -35,7 +35,7 @@ from src.config import get_config
 from src.negative_sampling import get_sampler
 from src.training.losses import get_loss_function
 from src.utils.common import set_seed
-from src.models import GCNModel, SAGEModel, TransformerModel, MODEL_CLASSES, LinkPredictor
+from src.models import GCNModel, SAGEModel, TransformerModel, GATModel, MODEL_CLASSES, LinkPredictor
 from src.features.heuristic_scores import compute_heuristic_edge_features
 from sklearn.metrics import average_precision_score, roc_auc_score, precision_recall_curve
 
@@ -113,6 +113,49 @@ class LeaveOneOutValidator:
         self.graph = torch.load(latest_graph_path, weights_only=False)
         print(f"  Graph: {self.graph.num_nodes} nodes, {self.graph.edge_index.shape[1]} edges")
         
+        # --- FEATURE ABLATION ---
+        ablation_mode = getattr(self.config, 'feature_ablation', None)
+        if ablation_mode and ablation_mode not in ['none', 'None', 'standard', 'original']:
+            print(f"\n[!!] FEATURE ABLATION ACTIVE: {ablation_mode}")
+            
+            num_nodes = self.graph.num_nodes
+            
+            feat_dim = self.graph.num_node_features
+            
+            if ablation_mode == 'constant':
+                print(f"  Replacing {feat_dim}-dim features with ONES")
+                self.graph.x = torch.ones((num_nodes, feat_dim))
+                
+            elif ablation_mode == 'random':
+                print(f"  Replacing {feat_dim}-dim features with RANDOM noise")
+                self.graph.x = torch.randn((num_nodes, feat_dim))
+                
+            elif ablation_mode == 'degree':
+                print(f"  Replacing features with DEGREE ONE-HOT (max_degree=100)")
+                # Calculate degrees
+                from torch_geometric.utils import degree
+                d = degree(self.graph.edge_index[0], num_nodes=num_nodes).long()
+                # Cap at 100 to keep dimension reasonable
+                d = d.clamp(max=99)
+                self.graph.x = torch.nn.functional.one_hot(d, num_classes=100).float()
+                # Update input dimension references
+                self.config.model_config['in_channels'] = 100
+                print(f"  New feature dimension: {self.graph.num_node_features}")
+                
+            elif ablation_mode == 'one_hot_id':
+                # This is risky for memory but theoretically useful
+                # Only use for small graphs
+                if num_nodes > 10000:
+                    print("  WARNING: one_hot_id requested but graph too large. Falling back to constant.")
+                    self.graph.x = torch.ones((num_nodes, feat_dim))
+                else:
+                    print("  Replacing features with NODE ID ONE-HOT")
+                    self.graph.x = torch.eye(num_nodes)
+                    self.config.model_config['in_channels'] = num_nodes
+            
+            else:
+                print(f"  Unknown ablation mode '{ablation_mode}', using original features.")
+        
         # Load mappings
         processed_data_path = Path('processed_data')
         
@@ -158,7 +201,60 @@ class LeaveOneOutValidator:
         is_drug[drug_indices] = True
         is_disease[disease_indices] = True
         
-        # Check edges
+        # --- EDGE ABLATION ---
+        edge_ablation = getattr(self.config, 'edge_ablation', None)
+        if edge_ablation and edge_ablation not in ['none', 'None', 'standard', 'original']:
+            print(f"\n[!!] EDGE ABLATION ACTIVE: {edge_ablation}")
+            
+            src, dst = self.graph.edge_index[0], self.graph.edge_index[1]
+            mask = torch.ones(src.size(0), dtype=torch.bool)
+            
+            # Create gene mask
+            gene_indices = list(self.gene_key_mapping.values())
+            is_gene = torch.zeros(self.graph.num_nodes, dtype=torch.bool)
+            is_gene[gene_indices] = True
+            
+            if edge_ablation == 'no_ppi' or edge_ablation == 'no_gene_gene':
+                # Remove Gene-Gene edges
+                # Both src and dst are genes
+                gg_mask = is_gene[src] & is_gene[dst]
+                print(f"  Removing {gg_mask.sum().item()} Gene-Gene edges (PPI)")
+                mask = mask & (~gg_mask)
+                
+            elif edge_ablation == 'no_disease_struct' or edge_ablation == 'no_disease_disease':
+                # Remove Disease-Disease edges
+                # Both src and dst are diseases
+                dd_mask = is_disease[src] & is_disease[dst]
+                print(f"  Removing {dd_mask.sum().item()} Disease-Disease edges")
+                mask = mask & (~dd_mask)
+                
+            elif edge_ablation == 'no_drug_target':
+                # Remove Drug-Gene and Gene-Drug edges
+                dg_mask = (is_drug[src] & is_gene[dst]) | (is_gene[src] & is_drug[dst])
+                print(f"  Removing {dg_mask.sum().item()} Drug-Gene edges")
+                mask = mask & (~dg_mask)
+            
+            elif edge_ablation == 'no_disease_gene':
+                # Remove Disease-Gene and Gene-Disease edges
+                # Note: This removes association scores too
+                dis_g_mask = (is_disease[src] & is_gene[dst]) | (is_gene[src] & is_disease[dst])
+                print(f"  Removing {dis_g_mask.sum().item()} Disease-Gene edges")
+                mask = mask & (~dis_g_mask)
+                
+            # Apply mask
+            self.graph.edge_index = self.graph.edge_index[:, mask]
+            if self.graph.edge_attr is not None:
+                self.graph.edge_attr = self.graph.edge_attr[mask]
+            
+            print(f"  Edges remaining: {self.graph.edge_index.shape[1]}")
+            
+            # Handle feature score ablation separately
+            if edge_ablation == 'no_scores':
+                if self.graph.edge_attr is not None and self.graph.edge_attr.shape[1] > 6:
+                    print("  Zeroing out association scores in edge attributes (col 7)")
+                    pass 
+        
+        # Refetch edge_index after potential modification
         edge_index = self.graph.edge_index
         src, dst = edge_index[0], edge_index[1]
         
@@ -771,7 +867,7 @@ class LeaveOneOutValidator:
         Run LOO validation across diseases specified in config.
         
         Uses config.optimisation_config.loo_validation_diseases list.
-        Returns aggregate metrics suitable for Bayesian optimization.
+        Returns aggregate metrics suitable for Bayesian optimisation.
         """
         self.load_graph_data()
         
@@ -1104,8 +1200,20 @@ class LeaveOneOutValidator:
         import itertools
         all_possible_pairs = list(itertools.product(drug_indices, disease_indices))
         
-        # 3. Init and Run Sampler
-        sampler = get_sampler(strategy, **params)
+        # These are the edges we're trying to predict - we must not sample them as negatives!
+        test_positive_edges = set()
+        for drug_idx in true_drug_neighbors:
+            if node_type == 'disease':
+                test_positive_edges.add((drug_idx, node_idx))
+            else:  # node_type == 'drug'
+                test_positive_edges.add((node_idx, drug_idx))
+        
+        print(f"  Excluding {len(test_positive_edges)} held-out test edges from negative sampling...")
+        
+        # 3. Init and Run Sampler with future_positives
+        params_with_future = params.copy()
+        params_with_future['future_positives'] = test_positive_edges
+        sampler = get_sampler(strategy, **params_with_future)
         
         neg_samples_list = sampler.sample(
             positive_edges=pos_edges_set,
@@ -1255,7 +1363,7 @@ def main():
     parser.add_argument('--log-metrics', type=str, default=None,
                        help='Path to CSV file to log per-epoch validation metrics')
     parser.add_argument('--model', type=str, default='TransformerModel',
-                       choices=['GCN', 'SAGE', 'Transformer', 'GCNModel', 'SAGEModel', 'TransformerModel'],
+                       choices=['GCN', 'SAGE', 'Transformer', 'GAT', 'GCNModel', 'SAGEModel', 'TransformerModel', 'GATModel'],
                        help='Model to use')
     parser.add_argument('--target-node', type=str, default=None,
                        help='Specific node to validate (e.g. "EFO_0003854").')

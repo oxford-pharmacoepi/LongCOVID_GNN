@@ -31,7 +31,7 @@ import glob
 warnings.filterwarnings('ignore')
 
 # Import from shared modules
-from src.models import GCNModel, TransformerModel, SAGEModel, MODEL_CLASSES
+from src.models import GCNModel, TransformerModel, SAGEModel, GATModel, MODEL_CLASSES
 from src.utils.common import set_seed, enable_full_reproducibility
 from src.config import get_config, create_custom_config
 from src.training.tracker import ExperimentTracker
