@@ -1,8 +1,16 @@
-drug_id drug_name
-CHEMBL4802135 nirmatrelvir
-CHEMBL163 ritonavir
-CHEMBL902 famotidine
-CHEMBL998 loratadine
-CHEMBL2105759 baricitinib
-CHEMBL1431 metformin
-CHEMBL19019 naltrexone
+drug_id	drug_name	Primary Mechanism / Study Context
+CHEMBL4802135	Nirmatrelvir	Antiviral; studied in combination with Ritonavir (Paxlovid) for viral persistence.
+CHEMBL163	Ritonavir	PK enhancer for Nirmatrelvir; also studied for potential independent antiviral effects.
+CHEMBL902	Famotidine	H2 Blocker; studied in the STIMULATE-ICP trial (often paired with Loratadine).
+CHEMBL998	Loratadine	H1 Blocker; studied for Mast Cell Activation Syndrome (MCAS) symptoms.
+CHEMBL2105759	Baricitinib	JAK Inhibitor; studied in the REVERSE-LC trial for neuro/cardiopulmonary symptoms.
+CHEMBL1431	Metformin	Studied in the COVID-OUT and ACTIV-6 trials for prevention and symptom reduction.
+CHEMBL19019	Naltrexone	"Low-Dose Naltrexone" (LDN); studied for neuro-inflammation and fatigue.
+CHEMBL810	Rivaroxaban	Anti-clotting agent; investigated for treating "micro-clots" (STIMULATE-ICP).
+CHEMBL41	Colchicine	Anti-inflammatory; studied for chest pain/pericarditis symptoms in Long COVID.
+CHEMBL507	Fluvoxamine	SSRI with S1R agonist activity; studied for potential neuro-protective effects.
+CHEMBL64	Atorvastatin	Statin; studied (often with Maraviroc) for vascular inflammation and endothelial health.
+CHEMBL1567	Maraviroc	CCR5 Antagonist; studied for immune modulation and viral entry inhibition.
+CHEMBL4297157	Ensitrelvir	Newer 3CL protease inhibitor (Xocova); studied as an alternative to Paxlovid.
+CHEMBL1152	Ibudilast	PDE4 Inhibitor; studied for neuro-inflammation and "brain fog."
+CHEMBL4594243	Rintatolimod	TLR3 Agonist (Ampligen); studied for immune dysfunction and ME/CFS-like symptoms.
