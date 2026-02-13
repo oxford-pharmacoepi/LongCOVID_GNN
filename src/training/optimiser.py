@@ -247,15 +247,26 @@ class BayesianOptimiser:
             model_class = TransformerModel
         
         # Create model with trial hyperparameters
-        model = model_class(
-            in_channels=self.graph.x.size(1),
-            hidden_channels=params['hidden_channels'],
-            out_channels=params['out_channels'],
-            num_layers=params['num_layers'],
-            dropout_rate=params['dropout_rate'],
-            heads=params.get('heads', 4),
-            concat=params.get('concat', False)
-        ).to(self.device)
+        # Only pass heads and concat to Transformer
+        if model_choice == 'Transformer':
+            model = model_class(
+                in_channels=self.graph.x.size(1),
+                hidden_channels=params['hidden_channels'],
+                out_channels=params['out_channels'],
+                num_layers=params['num_layers'],
+                dropout_rate=params['dropout_rate'],
+                heads=params.get('heads', 4),
+                concat=params.get('concat', False)
+            ).to(self.device)
+        else:
+            # GCN and SAGE don't use heads/concat
+            model = model_class(
+                in_channels=self.graph.x.size(1),
+                hidden_channels=params['hidden_channels'],
+                out_channels=params['out_channels'],
+                num_layers=params['num_layers'],
+                dropout_rate=params['dropout_rate']
+            ).to(self.device)
         
         return model
     

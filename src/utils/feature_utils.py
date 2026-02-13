@@ -30,8 +30,8 @@ def normalise(array, pad_length):
     df = array.to_pandas().to_numpy().reshape(-1, 1)
     df = pd.DataFrame(df)
     df.fillna(-1, inplace=True)
-    standardized = (df - df.mean()) / df.std()
-    tensor = torch.from_numpy(standardized.to_numpy())
+    standardised = (df - df.mean()) / df.std()
+    tensor = torch.from_numpy(standardised.to_numpy())
 
     max_length = len(pad_length)
     padding_size = max_length - tensor.shape[0]

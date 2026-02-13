@@ -139,7 +139,8 @@ def calculate_metrics(y_true, y_prob, y_pred, k_values=[10, 50, 100, 200, 500]):
             'TN': int(tn), 'FN': int(fn)
         },
         'ci_results': ci_results,
-        'ranking_metrics': ranking_metrics
+        'ranking_metrics': ranking_metrics,
+        **ranking_metrics # Flatten ranking metrics into main dict for easier access
     }
 
 
@@ -168,6 +169,26 @@ def calculate_recall_at_k(y_true, y_prob, k_values=[10, 50, 100, 200, 500]):
         recall_at_k[f'recall@{k}'] = recall
     
     return recall_at_k
+
+
+def calculate_hits_at_k(y_true, y_prob, k_values=[10, 50, 100, 200, 500]):
+    """
+    Calculate Hits@K for ranking-based evaluation.
+    Hits@K = 1 if at least one positive is in top K, else 0.
+    """
+    # Sort predictions by probability (descending)
+    sorted_indices = np.argsort(y_prob)[::-1]
+    
+    hits_at_k = {}
+    for k in k_values:
+        # Get top-K predictions
+        top_k_indices = sorted_indices[:k]
+        
+        # Check if at least one true positive is in top-K
+        hit = 1 if np.sum(y_true[top_k_indices] == 1) > 0 else 0
+        hits_at_k[f'hits_at_{k}'] = float(hit)
+    
+    return hits_at_k
 
 
 def calculate_precision_at_k(y_true, y_prob, k_values=[10, 50, 100, 200, 500]):
@@ -213,6 +234,9 @@ def calculate_ranking_metrics(y_true, y_prob, k_values=[10, 50, 100, 200, 500]):
     
     # Calculate Precision@K
     metrics.update(calculate_precision_at_k(y_true, y_prob, k_values))
+    
+    # Calculate Hits@K
+    metrics.update(calculate_hits_at_k(y_true, y_prob, k_values))
     
     # Calculate NDCG@K
     metrics.update(calculate_ndcg_at_k(y_true, y_prob, k_values))

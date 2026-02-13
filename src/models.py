@@ -6,7 +6,7 @@ All GNN model architectures used across the pipeline.
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, TransformerConv, SAGEConv
+from torch_geometric.nn import GCNConv, TransformerConv, SAGEConv, GATConv
 
 
 class GCNModel(torch.nn.Module):
@@ -191,6 +191,64 @@ class SAGEModel(torch.nn.Module):
         return x
 
 
+class GATModel(torch.nn.Module):
+    """Graph Attention Network model with edge feature support."""
+    
+    def __init__(self, in_channels, hidden_channels, out_channels, num_layers=2, dropout_rate=0.5, heads=4, concat=False, edge_dim=None):
+        super(GATModel, self).__init__()
+        self.num_layers = num_layers
+        self.heads = heads
+        self.concat = concat
+
+        # Calculate the actual output dimension after multi-head attention
+        head_out_channels = hidden_channels * heads if concat else hidden_channels
+
+        # Initial GAT layer with edge feature support
+        self.conv1 = GATConv(in_channels, hidden_channels, heads=heads, concat=concat, edge_dim=edge_dim, dropout=dropout_rate)
+
+        # Additional GAT layers
+        self.conv_list = torch.nn.ModuleList(
+            [GATConv(head_out_channels, hidden_channels, heads=heads, concat=concat, edge_dim=edge_dim, dropout=dropout_rate) for _ in range(num_layers - 1)]
+        )
+
+        # Layer normalization and dropout
+        self.ln = torch.nn.LayerNorm(head_out_channels)
+        self.dropout = torch.nn.Dropout(p=dropout_rate)
+
+        # Final output layer
+        self.final_layer = torch.nn.Linear(head_out_channels, out_channels)
+
+    def forward(self, x, edge_index, edge_attr=None):
+        """
+        Forward pass with optional edge attributes.
+        
+        Args:
+            x: Node features
+            edge_index: Edge connectivity
+            edge_attr: Optional edge features (supported by GATConv)
+        """
+        # Ensure input tensor is float32
+        x = x.float()
+        
+        # First GAT layer (with edge features if available)
+        x = self.conv1(x, edge_index, edge_attr=edge_attr)
+        x = self.ln(x)
+        x = F.relu(x)
+        x = self.dropout(x)
+
+        # Additional GAT layers
+        for k in range(self.num_layers - 1):
+            x = self.conv_list[k](x, edge_index, edge_attr=edge_attr)
+            x = self.ln(x)
+            if k < self.num_layers - 2:  # Apply activation and dropout except on the last hidden layer
+                x = F.relu(x)
+                x = self.dropout(x)
+
+        # Final layer to produce output
+        x = self.final_layer(x)
+        return x
+
+
 
 class LinkPredictor(nn.Module):
     """
@@ -213,6 +271,11 @@ class LinkPredictor(nn.Module):
         self.temperature = temperature
         self.hidden_channels = hidden_channels
         
+        # Add support for 'mlp_heuristic' as an alias for 'mlp_neighbor' for scripts compatibility
+        if decoder_type == 'mlp_heuristic':
+            self.decoder_type = 'mlp_neighbor'
+            decoder_type = 'mlp_neighbor'
+
         if decoder_type == 'mlp_interaction':
             # Interaction decoder: [src, dst, src*dst, |src-dst|] -> score
             # Input dimension: 4 * hidden_channels
@@ -251,6 +314,10 @@ class LinkPredictor(nn.Module):
         else:
             # Dot product decoder
             self.decoder = None
+
+    def forward(self, x, edge_index, edge_attr=None):
+        """Forward pass through encoder."""
+        return self.encoder(x, edge_index, edge_attr)
 
     def encode(self, x, edge_index, edge_attr=None):
         """Encode nodes using the GNN encoder."""
@@ -319,4 +386,6 @@ MODEL_CLASSES = {
     'TransformerModel': TransformerModel,
     'SAGE': SAGEModel,
     'SAGEModel': SAGEModel,
+    'GAT': GATModel,
+    'GATModel': GATModel,
 }
