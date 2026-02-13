@@ -202,41 +202,16 @@ class ModelEvaluator:
         """Create test dataset from the graph object."""
         print("Creating test dataset from graph...")
         
-        if use_test_split and hasattr(graph, 'test_edge_index') and hasattr(graph, 'test_edge_label'):
-            print("Using existing test split from graph")
-            test_edge_tensor = graph.test_edge_index
-            test_label_tensor = graph.test_edge_label
-        elif hasattr(graph, 'val_edge_index') and hasattr(graph, 'val_edge_label'):
-            print("Using validation split as test set")
-            test_edge_tensor = graph.val_edge_index
-            test_label_tensor = graph.val_edge_label
-        else:
-            print("Creating synthetic test dataset...")
-            # Create synthetic test data
-            num_test_edges = min(1000, graph.edge_index.size(1) // 10)
-            
-            # Sample random edges as positive examples
-            perm = torch.randperm(graph.edge_index.size(1))
-            test_pos_indices = perm[:num_test_edges//2]
-            test_pos_edges = graph.edge_index[:, test_pos_indices].t()
-            
-            # Generate random negative edges
-            num_nodes = graph.x.size(0)
-            test_neg_edges = []
-            while len(test_neg_edges) < num_test_edges//2:
-                src = random.randint(0, num_nodes-1)
-                dst = random.randint(0, num_nodes-1)
-                if src != dst:
-                    test_neg_edges.append([src, dst])
-            
-            test_neg_edges = torch.tensor(test_neg_edges, dtype=torch.long)
-            
-            # Combine positive and negative edges
-            test_edge_tensor = torch.cat([test_pos_edges, test_neg_edges], dim=0)
-            test_label_tensor = torch.cat([
-                torch.ones(len(test_pos_edges), dtype=torch.long),
-                torch.zeros(len(test_neg_edges), dtype=torch.long)
-            ])
+        # Require test split
+        if not (hasattr(graph, 'test_edge_index') and hasattr(graph, 'test_edge_label')):
+            raise ValueError(
+                "Graph must have test_edge_index and test_edge_label attributes!\n"
+                "Please regenerate your graph using: python scripts/1_create_graph.py"
+            )
+        
+        print("Using test split from graph")
+        test_edge_tensor = graph.test_edge_index
+        test_label_tensor = graph.test_edge_label
         
         print(f"Test set contains {len(test_edge_tensor)} samples")
         print(f"Positive samples: {torch.sum(test_label_tensor == 1).item()}")
