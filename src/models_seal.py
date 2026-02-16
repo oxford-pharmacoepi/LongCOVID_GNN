@@ -10,18 +10,26 @@ Reference
 Zhang & Chen (2018) — "Link Prediction Based on Graph Neural Networks" (NeurIPS)
 """
 
+import hashlib
+import random
+from pathlib import Path
 from typing import List, Optional, Tuple
 
-import networkx as nx
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import shortest_path
 from torch.utils.data import Dataset as TorchDataset
 from torch_geometric.data import Data
-from torch_geometric.nn import SAGEConv, global_max_pool, global_mean_pool
+from torch_geometric.nn import GCNConv, SAGEConv, GINConv, global_max_pool, global_mean_pool
 from torch_geometric.nn.aggr import SortAggregation
 from torch_geometric.utils import k_hop_subgraph
+
+
+# Default max DRNL label — shared across labelling and feature construction
+MAX_Z = 50
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -33,30 +41,37 @@ def drnl_node_labeling(
     src_node: int,
     dst_node: int,
     edge_index: torch.Tensor,
-    max_z: int = 1000,
+    max_z: int = MAX_Z,
 ) -> torch.Tensor:
     """Compute Double Radius Node Labelling (DRNL) for a local subgraph.
 
+    Uses scipy sparse BFS for fast shortest-path computation.
     Each node is labelled based on its shortest-path distances to *src_node*
     and *dst_node* within the subgraph.
     """
-    G = nx.Graph()
-    G.add_nodes_from(range(num_nodes))
-    G.add_edges_from(edge_index.t().tolist())
+    row = edge_index[0].numpy()
+    col = edge_index[1].numpy()
+    data = np.ones(len(row), dtype=np.float32)
+    adj = csr_matrix((data, (row, col)), shape=(num_nodes, num_nodes))
 
-    try:
-        src_dist = nx.single_source_shortest_path_length(G, src_node)
-    except Exception:
-        src_dist = {}
-    try:
-        dst_dist = nx.single_source_shortest_path_length(G, dst_node)
-    except Exception:
-        dst_dist = {}
+    # BFS-based shortest paths from src and dst (much faster than NetworkX)
+    src_dist_arr = shortest_path(adj, method="D", directed=False, indices=src_node)
+    dst_dist_arr = shortest_path(adj, method="D", directed=False, indices=dst_node)
 
-    z = []
+    z = torch.zeros(num_nodes, dtype=torch.long)
     for node in range(num_nodes):
-        d_s = src_dist.get(node, max_z)
-        d_t = dst_dist.get(node, max_z)
+        d_s = src_dist_arr[node]
+        d_t = dst_dist_arr[node]
+
+        if np.isinf(d_s):
+            d_s = max_z
+        else:
+            d_s = int(d_s)
+        if np.isinf(d_t):
+            d_t = max_z
+        else:
+            d_t = int(d_t)
+
         d = d_s + d_t
 
         if d_s == 0 and d_t == 0:
@@ -67,9 +82,9 @@ def drnl_node_labeling(
             label = 0
         else:
             label = 1 + min(d_s, d_t) + (d // 2) * ((d // 2) + (d % 2) - 1)
-        z.append(label)
+        z[node] = label
 
-    return torch.tensor(z, dtype=torch.long)
+    return z
 
 
 def extract_enclosing_subgraph(
@@ -77,43 +92,87 @@ def extract_enclosing_subgraph(
     dst: int,
     edge_index: torch.Tensor,
     node_features: Optional[torch.Tensor] = None,
-    num_hops: int = 2,
-    max_nodes_per_hop: Optional[int] = None,
-    max_z: int = 100,
+    num_hops: int = 1,
+    max_nodes_per_hop: Optional[int] = 200,
+    max_z: int = MAX_Z,
+    adj_dict: Optional[dict] = None,
 ) -> Tuple[Data, int, int]:
     """Extract the *k*-hop enclosing subgraph around a candidate link.
 
     Returns ``(subgraph_data, rel_src, rel_dst)`` where ``rel_src`` and
     ``rel_dst`` are the *local* indices of the source and destination nodes.
+
+    If *adj_dict* is provided (node → set of neighbours), it is used for fast
+    neighbour lookup instead of scanning all edges.
     """
     # Remove the target link to ensure clean extraction
     mask = ~((edge_index[0] == src) & (edge_index[1] == dst))
     mask &= ~((edge_index[0] == dst) & (edge_index[1] == src))
     clean_edge_index = edge_index[:, mask]
 
-    # k-hop neighbourhood
-    nodes, local_edge_index, mapping, _ = k_hop_subgraph(
-        node_idx=[src, dst],
-        num_hops=num_hops,
-        edge_index=clean_edge_index,
-        relabel_nodes=True,
-    )
+    if max_nodes_per_hop is not None:
+        # Hop-by-hop expansion with neighbour sampling
+        visited = {src, dst}
+        frontier = {src, dst}
+        for _ in range(num_hops):
+            new_nb = set()
+            if adj_dict is not None:
+                # O(degree) lookup
+                for node in frontier:
+                    new_nb.update(adj_dict.get(node, set()))
+            else:
+                # Vectorised: find all edges touching frontier nodes
+                frontier_t = torch.tensor(sorted(frontier), dtype=torch.long)
+                s, d = clean_edge_index
+                src_mask = torch.isin(s, frontier_t)
+                dst_mask = torch.isin(d, frontier_t)
+                nb_from_src = d[src_mask].tolist()
+                nb_from_dst = s[dst_mask].tolist()
+                new_nb.update(nb_from_src)
+                new_nb.update(nb_from_dst)
+            new_nb -= visited
+            if len(new_nb) > max_nodes_per_hop:
+                new_nb = set(random.sample(sorted(new_nb), max_nodes_per_hop))
+            visited |= new_nb
+            frontier = new_nb
 
-    rel_src = mapping[0].item()
-    rel_dst = mapping[1].item()
+        # Build local subgraph
+        node_list = sorted(visited)
+        node_tensor = torch.tensor(node_list, dtype=torch.long)
+        node_map = {n: i for i, n in enumerate(node_list)}
+
+        # Vectorised edge filtering
+        s, d = clean_edge_index
+        edge_mask = torch.isin(s, node_tensor) & torch.isin(d, node_tensor)
+        kept_s = s[edge_mask]
+        kept_d = d[edge_mask]
+
+        # Relabel nodes
+        remap = torch.zeros(int(node_tensor.max()) + 1, dtype=torch.long)
+        remap[node_tensor] = torch.arange(len(node_list))
+        local_edge_index = torch.stack([remap[kept_s], remap[kept_d]]) if kept_s.numel() > 0 else torch.zeros((2, 0), dtype=torch.long)
+
+        nodes = node_tensor
+        rel_src = node_map[src]
+        rel_dst = node_map[dst]
+    else:
+        # Standard PyG k-hop subgraph (no sampling)
+        nodes, local_edge_index, mapping, _ = k_hop_subgraph(
+            node_idx=[src, dst],
+            num_hops=num_hops,
+            edge_index=clean_edge_index,
+            relabel_nodes=True,
+        )
+        rel_src = mapping[0].item()
+        rel_dst = mapping[1].item()
+
     n = nodes.size(0)
 
-    # DRNL labels
+    # DRNL labels (uses same max_z as feature construction)
     z = drnl_node_labeling(n, rel_src, rel_dst, local_edge_index, max_z=max_z)
 
-    # Node features: concatenate original features with one-hot DRNL encoding
-    z_onehot = F.one_hot(z.clamp(max=max_z - 1), num_classes=max_z).float()
-    if node_features is not None:
-        x = torch.cat([node_features[nodes].float(), z_onehot], dim=1)
-    else:
-        x = z_onehot
-
-    subgraph_data = Data(x=x, edge_index=local_edge_index, z=z, num_nodes=n)
+    # Features are constructed on-the-fly in SEALDataset to save disk space
+    subgraph_data = Data(edge_index=local_edge_index, z=z, num_nodes=n, nodes=nodes)
     return subgraph_data, rel_src, rel_dst
 
 
@@ -137,16 +196,26 @@ class SEALModel(nn.Module):
         dropout_rate: float = 0.5,
         pooling: str = "sort",
         k: int = 30,
+        conv_type: str = "sage",
     ):
         super().__init__()
         self.num_layers = num_layers
         self.pooling = pooling
         self.k = k
 
-        # GNN layers
-        self.convs = nn.ModuleList([SAGEConv(in_channels, hidden_channels)])
+        # GNN layers — choose convolution type
+        def make_conv(in_c, out_c):
+            if conv_type == "gcn":
+                return GCNConv(in_c, out_c)
+            elif conv_type == "gin":
+                mlp = nn.Sequential(nn.Linear(in_c, out_c), nn.ReLU(), nn.Linear(out_c, out_c))
+                return GINConv(mlp)
+            else:  # default: sage
+                return SAGEConv(in_c, out_c)
+
+        self.convs = nn.ModuleList([make_conv(in_channels, hidden_channels)])
         for _ in range(num_layers - 1):
-            self.convs.append(SAGEConv(hidden_channels, hidden_channels))
+            self.convs.append(make_conv(hidden_channels, hidden_channels))
 
         # Batch normalisation
         self.bns = nn.ModuleList([nn.BatchNorm1d(hidden_channels) for _ in range(num_layers)])
@@ -154,16 +223,17 @@ class SEALModel(nn.Module):
 
         # Readout layer
         if pooling == "sort":
-            self.aggr = SortAggregation(k=k)
-        elif pooling == "mean":
-            self.aggr = global_mean_pool
-        elif pooling == "max":
-            self.aggr = global_max_pool
-        else:
-            raise ValueError(f"Unknown pooling: {pooling}")
+            self.sort_aggr = SortAggregation(k=k)
+        self.pooling_name = pooling
 
         # MLP classifier
-        mlp_in = k * hidden_channels if pooling == "sort" else hidden_channels
+        if pooling == "sort":
+            mlp_in = k * hidden_channels
+        elif pooling == "mean+max":
+            mlp_in = hidden_channels * 2
+        else:
+            mlp_in = hidden_channels
+
         self.mlp = nn.Sequential(
             nn.Linear(mlp_in, hidden_channels),
             nn.ReLU(),
@@ -186,10 +256,16 @@ class SEALModel(nn.Module):
                 x = self.dropout(x)
 
         # Graph-level readout
-        if self.pooling == "sort":
-            x = self.aggr(x, batch)
+        if self.pooling_name == "sort":
+            x = self.sort_aggr(x, batch)
+        elif self.pooling_name == "mean":
+            x = global_mean_pool(x, batch)
+        elif self.pooling_name == "max":
+            x = global_max_pool(x, batch)
+        elif self.pooling_name == "mean+max":
+            x = torch.cat([global_mean_pool(x, batch), global_max_pool(x, batch)], dim=1)
         else:
-            x = self.aggr(x, batch)
+            raise ValueError(f"Unknown pooling: {self.pooling_name}")
 
         return self.mlp(x).squeeze(-1)
 
@@ -203,6 +279,8 @@ class SEALDataset(TorchDataset):
 
     Stores only the list of (src, dst) pairs and their labels; subgraphs are
     extracted in ``__getitem__`` to avoid keeping all subgraphs in memory.
+    
+    Includes persistent caching to allow fast re-runs and fast epochs after the first.
     """
 
     def __init__(
@@ -212,20 +290,39 @@ class SEALDataset(TorchDataset):
         labels: List[int],
         edge_index: torch.Tensor,
         node_features: torch.Tensor,
-        num_hops: int = 2,
+        num_hops: int = 1,
+        max_z: int = MAX_Z,
+        max_nodes_per_hop: int = 200,
+        adj_dict: Optional[dict] = None,
+        use_cache: bool = True,
+        save_cache: bool = True,
         transform=None,
         pre_transform=None,
     ):
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
         self.pairs = pairs
         self.labels = labels
         self.edge_index = edge_index
         self.node_features = node_features
         self.num_hops = num_hops
+        self.max_z = max_z
+        self.max_nodes_per_hop = max_nodes_per_hop
+        self.adj_dict = adj_dict
+        self.use_cache = use_cache
+        self.save_cache = save_cache
 
         # Fallback feature dimension for dummy graphs
-        self.feature_dim = 100  # max_z default
+        self.feature_dim = max_z
         if node_features is not None:
             self.feature_dim += node_features.size(1)
+
+        # Cache hash uses shape + content signature to avoid stale hits
+        edge_sig = f"{edge_index.shape}_{edge_index[:, :5].tolist()}_{edge_index[:, -5:].tolist()}"
+        graph_hash = hashlib.md5(edge_sig.encode()).hexdigest()[:12]
+        self.cache_dir = self.root / f"cache_{graph_hash}_hops{num_hops}_mnph{max_nodes_per_hop}"
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        print(f"  SEAL Cache: {self.cache_dir}")
 
     def __len__(self) -> int:
         return len(self.pairs)
@@ -233,19 +330,52 @@ class SEALDataset(TorchDataset):
     def __getitem__(self, idx: int) -> Data:
         src, dst = self.pairs[idx]
         label = self.labels[idx]
+        max_z = self.max_z
+        
+        # Check cache
+        cache_file = self.cache_dir / f"subgraph_{src}_{dst}.pt"
+        subgraph = None
+        
+        if self.use_cache and cache_file.exists():
+            try:
+                subgraph = torch.load(cache_file, weights_only=False)
+            except Exception:
+                pass
 
-        try:
-            subgraph, _, _ = extract_enclosing_subgraph(
-                src, dst, self.edge_index, self.node_features, num_hops=self.num_hops,
-            )
-            subgraph.y = torch.tensor([label], dtype=torch.float)
-            return subgraph
-        except Exception:
-            # Return a minimal dummy graph to preserve batch alignment
-            return Data(
-                x=torch.zeros((1, self.feature_dim), dtype=torch.float),
-                edge_index=torch.zeros((2, 0), dtype=torch.long),
-                z=torch.zeros((1,), dtype=torch.long),
-                y=torch.tensor([label], dtype=torch.float),
-                num_nodes=1,
-            )
+        if subgraph is None:
+            try:
+                subgraph, _, _ = extract_enclosing_subgraph(
+                    src, dst, self.edge_index, None,
+                    num_hops=self.num_hops, max_z=max_z,
+                    max_nodes_per_hop=self.max_nodes_per_hop,
+                    adj_dict=self.adj_dict,
+                )
+                # Save minimal topo to cache
+                if self.save_cache:
+                    torch.save(subgraph, cache_file)
+            except Exception:
+                # Return a minimal dummy graph to preserve batch alignment
+                return Data(
+                    x=torch.zeros((1, self.feature_dim), dtype=torch.float),
+                    edge_index=torch.zeros((2, 0), dtype=torch.long),
+                    z=torch.zeros((1,), dtype=torch.long),
+                    y=torch.tensor([label], dtype=torch.float),
+                    num_nodes=1,
+                )
+
+        # Reconstruct features on-the-fly
+        z = subgraph.z
+        z_onehot = F.one_hot(z.clamp(max=max_z - 1), num_classes=max_z).float()
+        if self.node_features is not None:
+            nodes = subgraph.nodes
+            subgraph.x = torch.cat([self.node_features[nodes].float(), z_onehot], dim=1)
+        else:
+            subgraph.x = z_onehot
+            
+        subgraph.y = torch.tensor([label], dtype=torch.float)
+
+        # Remove helper attrs not needed for batching (avoids KeyError in collation)
+        if hasattr(subgraph, 'nodes'):
+            del subgraph.nodes
+
+        return subgraph
