@@ -224,6 +224,10 @@ tmp/
 ehthumbs.db
 Thumbs.db
 
+# GCP deployment (private infrastructure, not for public repo)
+docker/run_gcp.sh
+results/gcp-*/
+
 # Configuration files (keep templates, ignore local configs)
 config_local.json
 config_production.json
