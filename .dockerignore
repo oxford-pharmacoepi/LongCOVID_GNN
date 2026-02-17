@@ -1,0 +1,40 @@
+# Git history (large, not needed in container)
+.git
+.gitignore
+
+# Local environments
+.venv
+venv
+env
+.env
+__pycache__
+*.pyc
+
+# IDE
+.vscode
+.idea
+.DS_Store
+.gemini
+
+# Large generated outputs (mount as volumes instead)
+results/
+raw_data/
+processed_data/
+mlruns/
+
+# OS files
+Thumbs.db
+
+# Lock files (rebuild in container for Linux)
+uv.lock
+
+# Docs / non-essential
+report/
+*.md
+!README.md
+
+# Docker (avoid recursive context, but allow entrypoint.sh)
+docker/Dockerfile
+
+# Tests (not needed in production container)
+tests/
