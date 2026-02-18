@@ -29,6 +29,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.models_seal import SEALDataset, SEALModel, MAX_Z
+from src.training.tracker import ExperimentTracker
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -192,11 +193,26 @@ def train_seal_leave_one_out(
     warmup_epochs: int = 5,
     use_jk: bool = False,
     use_node_types: bool = True,
+    mlflow_tracking: bool = True,
 ):
     """Train SEAL with leave-one-out validation for *target_disease*."""
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
+
+    # ── MLflow setup ────────────────────────────────────────────────────
+    tracker = None
+    if mlflow_tracking:
+        try:
+            tracker = ExperimentTracker(
+                experiment_name=f"SEAL-{target_disease}",
+            )
+            run_name = f"seal_{conv_type}_{hidden_channels}h_{num_hops}hop_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+            tracker.start_run(run_name=run_name)
+            print(f"MLflow tracking enabled: SEAL-{target_disease} / {run_name}")
+        except Exception as e:
+            print(f"MLflow init failed ({e}), continuing without tracking")
+            tracker = None
 
     # ── 1. Load graph and mappings ──────────────────────────────────────
     print("Finding graph...")
@@ -406,6 +422,10 @@ def train_seal_leave_one_out(
             val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
         )
 
+    # Pre-cache subgraphs in parallel (speeds up first run significantly)
+    print("\nPre-caching subgraphs...")
+    train_dataset.precache_parallel(num_workers=num_workers if num_workers > 0 else 0)
+
     # ── 5. Model setup ──────────────────────────────────────────────────
     first_batch = next(iter(train_loader))
     in_channels = first_batch.x.shape[1]
@@ -446,6 +466,49 @@ def train_seal_leave_one_out(
     print(f"  Total parameters: {total_params:,}")
     if val_loader:
         print(f"  Early stopping: patience={patience}")
+
+    # ── MLflow: log parameters ──────────────────────────────────────────
+    if tracker:
+        # Graph metadata
+        tracker.log_param("graph_path", graph_path)
+        tracker.log_metric("graph_num_nodes", graph_data.num_nodes)
+        tracker.log_metric("graph_num_edges", edge_index.shape[1])
+        tracker.log_metric("graph_num_features", node_features.shape[1] if node_features is not None else 0)
+        tracker.log_param("target_disease", target_disease)
+        # Model architecture
+        tracker.log_param("conv_type", conv_type)
+        tracker.log_param("hidden_channels", hidden_channels)
+        tracker.log_param("num_layers", num_layers)
+        tracker.log_param("pooling", pooling)
+        tracker.log_param("use_jk", use_jk)
+        tracker.log_param("use_node_types", use_node_types)
+        tracker.log_param("max_z", max_z)
+        tracker.log_param("in_channels", in_channels)
+        tracker.log_metric("total_parameters", total_params)
+        # Training hyperparameters
+        tracker.log_param("epochs", epochs)
+        tracker.log_param("batch_size", batch_size)
+        tracker.log_param("lr", lr)
+        tracker.log_param("weight_decay", weight_decay)
+        tracker.log_param("dropout", dropout)
+        tracker.log_param("grad_clip", grad_clip)
+        tracker.log_param("warmup_epochs", warmup_epochs)
+        tracker.log_param("pos_weight", pos_weight)
+        tracker.log_param("seed", seed)
+        # Negative sampling
+        tracker.log_param("neg_strategy", neg_strategy)
+        tracker.log_param("neg_ratio", neg_ratio)
+        tracker.log_param("hard_ratio", hard_ratio if neg_strategy == "mixed" else None)
+        # Subgraph configuration
+        tracker.log_param("num_hops", num_hops)
+        tracker.log_param("max_nodes_per_hop", max_nodes_per_hop)
+        # Data splits
+        tracker.log_param("val_ratio", val_ratio)
+        tracker.log_param("patience", patience)
+        tracker.log_metric("train_edges", len(train_edges))
+        tracker.log_metric("val_edges", len(val_edges) if val_edges else 0)
+        tracker.log_metric("test_edges", len(test_edges))
+        tracker.log_metric("neg_train_edges", len(neg_train_edges))
 
     # ── 6. Training loop with early stopping ────────────────────────────
     print(f"\nTraining SEAL model for up to {epochs} epochs...", flush=True)
@@ -506,6 +569,13 @@ def train_seal_leave_one_out(
             if val_auc is not None:
                 status += f", Val AUC: {val_auc:.4f} (best: {best_val_auc:.4f})"
             print(status, flush=True)
+
+            # Log epoch metrics to MLflow
+            if tracker:
+                tracker.log_training_metrics(
+                    epoch + 1, avg_loss,
+                    val_metrics={"val_auc": val_auc} if val_auc is not None else None,
+                )
 
         # Early stopping
         if patience > 0 and epochs_without_improvement >= patience:
@@ -635,6 +705,24 @@ def train_seal_leave_one_out(
         json.dump(results_json, f, indent=2)
     print(f"Results saved to: {json_path}")
 
+    # ── MLflow: log final results ───────────────────────────────────────
+    if tracker:
+        tracker.log_metric("best_val_auc", best_val_auc)
+        tracker.log_metric("hits_at_10", hits_at_10)
+        tracker.log_metric("hits_at_20", hits_at_20)
+        tracker.log_metric("hits_at_50", hits_at_50)
+        tracker.log_metric("hits_at_100", hits_at_100)
+        tracker.log_metric("median_rank", median_rank)
+        tracker.log_metric("mean_rank", mean_rank)
+        tracker.log_metric("mrr", mrr)
+        tracker.log_metric("total_true", n)
+        tracker.log_metric("total_drugs", total_drugs)
+        tracker.log_metric("final_epoch", epoch + 1)
+        # Log results JSON as artifact
+        tracker.log_artifact(str(json_path), "seal_results")
+        tracker.end_run()
+        print(f"MLflow run logged to: SEAL-{target_disease}")
+
     return model, median_rank, hits_at_20
 
 
@@ -699,6 +787,10 @@ if __name__ == "__main__":
     parser.add_argument("--patience", type=int, default=10,
                         help="Early stopping patience (0 to disable)")
 
+    # MLflow
+    parser.add_argument("--no-mlflow", action="store_true",
+                        help="Disable MLflow experiment tracking")
+
     args = parser.parse_args()
 
     train_seal_leave_one_out(
@@ -729,4 +821,5 @@ if __name__ == "__main__":
         warmup_epochs=args.warmup_epochs,
         use_jk=args.use_jk,
         use_node_types=not args.no_node_types,
+        mlflow_tracking=not args.no_mlflow,
     )

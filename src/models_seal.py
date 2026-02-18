@@ -405,3 +405,60 @@ class SEALDataset(TorchDataset):
             del subgraph.nodes
 
         return subgraph
+
+    def precache_parallel(self, num_workers: int = 0):
+        """Pre-extract and cache all subgraphs using parallel threads.
+
+        Skips pairs already cached on disk.  Uses threads (not processes)
+        to share the adj_dict without serialisation overhead.
+
+        Parameters
+        ----------
+        num_workers : int
+            Number of threads.  0 = auto (cpu_count - 1, capped at 8).
+        """
+        import os
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        if num_workers <= 0:
+            num_workers = min(os.cpu_count() - 1, 8)
+
+        # Find indices that still need caching
+        uncached = []
+        for idx in range(len(self)):
+            src, dst = self.pairs[idx]
+            cache_file = self.cache_dir / f"subgraph_{src}_{dst}.pt"
+            if not cache_file.exists():
+                uncached.append(idx)
+
+        if not uncached:
+            print(f"  All {len(self)} subgraphs already cached.")
+            return
+
+        print(f"  Pre-caching {len(uncached)}/{len(self)} subgraphs "
+              f"using {num_workers} threads...")
+
+        done = 0
+        errors = 0
+
+        def _extract_one(idx):
+            """Extract a single subgraph (triggers caching via __getitem__)."""
+            try:
+                _ = self[idx]
+                return True
+            except Exception:
+                return False
+
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(_extract_one, i): i for i in uncached}
+            for future in as_completed(futures):
+                if future.result():
+                    done += 1
+                else:
+                    errors += 1
+                if (done + errors) % 500 == 0:
+                    print(f"    Cached {done + errors}/{len(uncached)} "
+                          f"({errors} errors)")
+
+        print(f"  Pre-caching complete: {done} OK, {errors} errors.")
+
