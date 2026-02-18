@@ -37,6 +37,7 @@ from src.training.losses import get_loss_function
 from src.utils.common import set_seed
 from src.models import GCNModel, SAGEModel, TransformerModel, GATModel, MODEL_CLASSES, LinkPredictor
 from src.features.heuristic_scores import compute_heuristic_edge_features
+from src.training.tracker import ExperimentTracker
 from sklearn.metrics import average_precision_score, roc_auc_score, precision_recall_curve
 
 
@@ -1281,32 +1282,33 @@ class LeaveOneOutValidator:
             print(f"{'Rank':<5} {'Score':<10} {'Prob':<10} {'CN':<8} {'AA':<8} {'Drug ID':<20} {'Warning':<20} {'Is True?'}")
             print("-" * 120)
             
-            hits = 0
-            for rank, (drug_idx, score, prob, cn, aa) in enumerate(sorted_drugs[:k], 1):
+            # Build top-20 list for display and JSON
+            top20_list = []
+            for rank, (drug_idx, score, prob, cn, aa) in enumerate(sorted_drugs[:20], 1):
                 drug_id = self.idx_to_drug.get(drug_idx, "Unknown")
                 is_true = drug_idx in true_drug_neighbors
-                mark = "✓ YES (RECOVERED)" if is_true else ""
 
                 # Check warnings using ChemBL ID
                 warnings = safety_map.get(drug_id, [])
                 safe_str = ", ".join(warnings) if warnings else "Safe"
                 if "Black Box Warning" in warnings:
-                    safe_str = " LACK BOX"
+                    safe_str = "BLACK BOX"
                 elif "Withdrawn" in warnings:
                     safe_str = "WITHDRAWN"
 
-                if is_true:
-                    hits += 1
-                
+                top20_list.append({
+                    "rank": rank, "drug_id": drug_id, "score": round(score, 4),
+                    "prob": round(prob, 4), "is_true": is_true,
+                })
+                mark = "✓ YES (RECOVERED)" if is_true else ""
                 print(f"{rank:<5} {score:<10.4f} {prob:<10.4f} {cn:<8.1f} {aa:<8.2f} {drug_id:<20} {safe_str:<20} {mark}")
             
-            # Calculate ranks for all true neighbors
+            # Calculate ranks for all true neighbours
             print(f"\nAnalysis of True Drug Connections (Total: {len(true_drug_neighbors)}):")
             print(f"{'Drug ID':<20} {'Rank':<8} {'Score':<10} {'GNN':<10} {'Heur':<10} {'Prob':<10} {'Warning'}")
             print("-" * 120)
             
             ranks = []
-            # Helper map for fast lookup
             rank_map = {d: (r, s, p, g, h) for r, (d, s, p, g, h) in enumerate(sorted_drugs, 1)}
             
             for drug_idx in true_drug_neighbors:
@@ -1315,7 +1317,6 @@ class LeaveOneOutValidator:
                     ranks.append(rank)
                     drug_id = self.idx_to_drug.get(drug_idx, "Unknown")
                     
-                    # Check warnings
                     warnings = safety_map.get(drug_id, [])
                     safe_str = ", ".join(warnings) if warnings else "Safe"
                     if "Black Box Warning" in warnings: safe_str = "BLACK BOX"
@@ -1323,23 +1324,95 @@ class LeaveOneOutValidator:
                     
                     print(f"{drug_id:<20} {rank:<8} {score:<10.4f} {gnn_s:<10.4f} {h_s:<10.4f} {prob:<10.4f} {safe_str}")
                 else:
-                    # Should not happen if all drugs are scored
                     ranks.append(len(sorted_drugs) + 1)
             
             ranks = np.array(ranks)
-            mean_rank = np.mean(ranks) if len(ranks) > 0 else 0
-            median_rank = np.median(ranks) if len(ranks) > 0 else 0
+            n = len(ranks)
+            total_drugs = len(sorted_drugs)
+            mean_rank = float(np.mean(ranks)) if n > 0 else 0
+            median_rank = float(np.median(ranks)) if n > 0 else 0
             
-            print(f"\nMetrics:")
-            print(f"  Hits@{k}: {hits} / {len(true_drug_neighbors)}")
+            # Standardised metrics (matching SEAL output)
+            hits_at_10 = int(np.sum(ranks <= 10))
+            hits_at_20 = int(np.sum(ranks <= 20))
+            hits_at_50 = int(np.sum(ranks <= 50))
+            hits_at_100 = int(np.sum(ranks <= 100))
+            mrr = float(np.mean(1.0 / ranks)) if n > 0 else 0.0
+            
+            print(f"\n{'=' * 60}")
+            print(f"GNN PERFORMANCE SUMMARY FOR {true_name}")
+            print(f"{'=' * 60}")
+            print(f"  Test Edges (True Positives): {n}")
+            print(f"  Total Drugs Ranked: {total_drugs}")
+            print(f"  Model: {self.config.model_choice}")
+            if n > 0:
+                print(f"  Hits@10:  {hits_at_10} / {n} ({hits_at_10 / n * 100:.1f}%)")
+                print(f"  Hits@20:  {hits_at_20} / {n} ({hits_at_20 / n * 100:.1f}%)")
+                print(f"  Hits@50:  {hits_at_50} / {n} ({hits_at_50 / n * 100:.1f}%)")
+                print(f"  Hits@100: {hits_at_100} / {n} ({hits_at_100 / n * 100:.1f}%)")
             print(f"  Median Rank: {median_rank:.1f}")
-            print(f"  Mean Rank: {mean_rank:.2f}")
+            print(f"  Mean Rank: {mean_rank:.1f}")
+            print(f"  MRR: {mrr:.4f}")
+            print(f"{'=' * 60}")
+            
+            # Save standardised JSON (matching SEAL format)
+            results_dir = Path("results/gnn_results")
+            results_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            results_json = {
+                "method": "gnn",
+                "target_disease": true_name,
+                "timestamp": timestamp,
+                "config": {
+                    "model": self.config.model_choice,
+                    "epochs": self.epochs_per_fold,
+                    "removal_mode": self.removal_mode,
+                    "num_layers": self.config.model_config.get('num_layers'),
+                    "hidden_channels": self.config.model_config.get('hidden_channels'),
+                    "decoder_type": self.config.model_config.get('decoder_type'),
+                    "seed": getattr(self, '_seed', 42),
+                },
+                "metrics": {
+                    "hits_at_10": hits_at_10, "hits_at_20": hits_at_20,
+                    "hits_at_50": hits_at_50, "hits_at_100": hits_at_100,
+                    "total_true": n, "total_drugs": total_drugs,
+                    "median_rank": round(median_rank, 1),
+                    "mean_rank": round(mean_rank, 1),
+                    "mrr": round(mrr, 4),
+                },
+                "top20": top20_list,
+                "all_ranks": sorted(ranks.tolist()),
+            }
+            
+            json_path = results_dir / f"gnn_{true_name}_{timestamp}.json"
+            with open(json_path, "w") as f:
+                json.dump(results_json, f, indent=2)
+            print(f"Results saved to: {json_path}")
+            
+            # MLflow tracking (if tracker available on validator)
+            if hasattr(self, 'tracker') and self.tracker:
+                self.tracker.log_metric("hits_at_10", hits_at_10)
+                self.tracker.log_metric("hits_at_20", hits_at_20)
+                self.tracker.log_metric("hits_at_50", hits_at_50)
+                self.tracker.log_metric("hits_at_100", hits_at_100)
+                self.tracker.log_metric("median_rank", median_rank)
+                self.tracker.log_metric("mean_rank", mean_rank)
+                self.tracker.log_metric("mrr", mrr)
+                self.tracker.log_metric("total_true", n)
+                self.tracker.log_metric("total_drugs", total_drugs)
+                self.tracker.log_artifact(str(json_path))
             
             if return_metrics:
                 return {
-                    'hits': hits,
+                    'hits': hits_at_20,
+                    'hits_at_10': hits_at_10,
+                    'hits_at_20': hits_at_20,
+                    'hits_at_50': hits_at_50,
+                    'hits_at_100': hits_at_100,
                     'mean_rank': mean_rank,
-                    'median_rank': median_rank
+                    'median_rank': median_rank,
+                    'mrr': mrr,
                 }
 
 def main():
@@ -1375,6 +1448,8 @@ def main():
     parser.add_argument("--layers", type=int, help="Number of GNN layers")
     parser.add_argument("--decoder-type", type=str, choices=['dot', 'mlp', 'mlp_interaction', 'mlp_neighbor'], 
                       help="Type of decoder to use")
+    parser.add_argument("--no-mlflow", action="store_true",
+                      help="Disable MLflow experiment tracking")
     
     args = parser.parse_args()
     
@@ -1453,12 +1528,43 @@ def main():
         epochs_per_fold=args.epochs
     )
     
-    # Store graph path in validator
+    # Store graph path and seed in validator
     validator.graph_path = args.graph
+    validator._seed = args.seed
+    
+    # MLflow tracking
+    if not args.no_mlflow and args.target_node:
+        tracker = ExperimentTracker(
+            experiment_name=f"GNN-{args.target_node}",
+        )
+        run_name = f"gnn_{args.model}_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        tracker.start_run(run_name=run_name)
+        print(f"MLflow tracking enabled: GNN-{args.target_node} / {run_name}")
+        
+        # Log parameters
+        tracker.log_param("method", "gnn")
+        tracker.log_param("target_disease", args.target_node)
+        tracker.log_param("model", args.model)
+        tracker.log_param("epochs", args.epochs)
+        tracker.log_param("seed", args.seed)
+        tracker.log_param("removal_mode", args.removal_mode)
+        tracker.log_param("num_layers", config.model_config.get('num_layers'))
+        tracker.log_param("hidden_channels", config.model_config.get('hidden_channels'))
+        tracker.log_param("decoder_type", config.model_config.get('decoder_type'))
+        tracker.log_param("graph_path", args.graph)
+        
+        validator.tracker = tracker
+    else:
+        validator.tracker = None
     
     if args.target_node:
         # 1. Run specific node validation
         validator.validate_specific_node(args.target_node, log_metrics_file=args.log_metrics)
+        
+        # End MLflow run
+        if validator.tracker:
+            validator.tracker.end_run()
+            print(f"Ended MLflow run.")
     
     elif args.multi_disease:
         # 2. Run multi-disease LOO (diseases from config)

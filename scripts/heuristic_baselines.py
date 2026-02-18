@@ -129,13 +129,15 @@ class HeuristicBaseline:
         neighbors = self.adj_list[disease_idx]
         return neighbors & drug_indices
     
-    def evaluate_loo(self, target_node: str, k: int = 20):
+    def evaluate_loo(self, target_node: str, k: int = 20, tracker=None):
         """
         Leave-One-Out evaluation for a disease.
         
         Ranks all drugs for the disease using each heuristic.
-        Reports Hits@K and Mean Rank.
+        Reports standardised metrics matching SEAL output format.
         """
+        import datetime as dt
+        
         # Resolve node
         if target_node in self.disease_key_mapping:
             disease_idx = self.disease_key_mapping[target_node]
@@ -178,38 +180,59 @@ class HeuristicBaseline:
             
             # Sort by score descending
             sorted_drugs = sorted(scores, key=lambda x: x[1], reverse=True)
-            
-            # Calculate metrics
-            hits = 0
-            ranks = []
+            total_drugs = len(sorted_drugs)
             
             # Build rank lookup
             rank_map = {d: r for r, (d, _) in enumerate(sorted_drugs, 1)}
             
-            print(f"\nTop {k} predictions:")
+            # Build top-20 list for display and JSON
+            print(f"\nTop 20 predictions:")
             print(f"{'Rank':<6} {'Score':<12} {'Drug ID':<20} {'True?'}")
             print("-" * 55)
             
-            for rank, (drug_idx, score) in enumerate(sorted_drugs[:k], 1):
+            top20_list = []
+            for rank, (drug_idx, score) in enumerate(sorted_drugs[:20], 1):
                 drug_id = self.idx_to_drug.get(drug_idx, "Unknown")
                 is_true = drug_idx in true_drugs
                 mark = "✓" if is_true else ""
-                if is_true:
-                    hits += 1
+                top20_list.append({
+                    "rank": rank, "drug_id": drug_id,
+                    "score": round(score, 6), "is_true": is_true,
+                })
                 print(f"{rank:<6} {score:<12.4f} {drug_id:<20} {mark}")
             
             # Get ranks for all true drugs
+            ranks = []
             for drug_idx in true_drugs:
                 ranks.append(rank_map.get(drug_idx, len(drug_indices) + 1))
             
             ranks = np.array(ranks)
-            mean_rank = np.mean(ranks)
-            median_rank = np.median(ranks)
+            n = len(ranks)
+            mean_rank = float(np.mean(ranks))
+            median_rank = float(np.median(ranks))
             
-            print(f"\nMetrics:")
-            print(f"  Hits@{k}: {hits} / {len(true_drugs)}")
-            print(f"  Mean Rank: {mean_rank:.1f}")
+            # Standardised metrics (matching SEAL output)
+            hits_at_10 = int(np.sum(ranks <= 10))
+            hits_at_20 = int(np.sum(ranks <= 20))
+            hits_at_50 = int(np.sum(ranks <= 50))
+            hits_at_100 = int(np.sum(ranks <= 100))
+            mrr = float(np.mean(1.0 / ranks)) if n > 0 else 0.0
+            
+            # Display standardised summary
+            print(f"\n{'=' * 60}")
+            print(f"HEURISTIC ({heuristic_name}) SUMMARY FOR {disease_name}")
+            print(f"{'=' * 60}")
+            print(f"  Test Edges (True Positives): {n}")
+            print(f"  Total Drugs Ranked: {total_drugs}")
+            if n > 0:
+                print(f"  Hits@10:  {hits_at_10} / {n} ({hits_at_10 / n * 100:.1f}%)")
+                print(f"  Hits@20:  {hits_at_20} / {n} ({hits_at_20 / n * 100:.1f}%)")
+                print(f"  Hits@50:  {hits_at_50} / {n} ({hits_at_50 / n * 100:.1f}%)")
+                print(f"  Hits@100: {hits_at_100} / {n} ({hits_at_100 / n * 100:.1f}%)")
             print(f"  Median Rank: {median_rank:.1f}")
+            print(f"  Mean Rank: {mean_rank:.1f}")
+            print(f"  MRR: {mrr:.4f}")
+            print(f"{'=' * 60}")
             
             # Show all true drug ranks
             print(f"\nTrue drug ranks:")
@@ -219,41 +242,108 @@ class HeuristicBaseline:
                 score = next((s for d, s in scores if d == drug_idx), 0)
                 print(f"  {drug_id:<20} Rank: {rank:<6} Score: {score:.4f}")
             
+            # Save standardised JSON (matching SEAL format)
+            heuristic_key = heuristic_name.lower().replace(' ', '_')
+            results_dir = Path("results/heuristic_results")
+            results_dir.mkdir(parents=True, exist_ok=True)
+            timestamp = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            results_json = {
+                "method": f"heuristic_{heuristic_key}",
+                "target_disease": disease_name,
+                "timestamp": timestamp,
+                "config": {
+                    "heuristic": heuristic_name,
+                },
+                "metrics": {
+                    "hits_at_10": hits_at_10, "hits_at_20": hits_at_20,
+                    "hits_at_50": hits_at_50, "hits_at_100": hits_at_100,
+                    "total_true": n, "total_drugs": total_drugs,
+                    "median_rank": round(median_rank, 1),
+                    "mean_rank": round(mean_rank, 1),
+                    "mrr": round(mrr, 4),
+                },
+                "top20": top20_list,
+                "all_ranks": sorted(ranks.tolist()),
+            }
+            
+            json_path = results_dir / f"heuristic_{heuristic_key}_{disease_name}_{timestamp}.json"
+            with open(json_path, "w") as f:
+                json.dump(results_json, f, indent=2)
+            print(f"Results saved to: {json_path}")
+            
+            # MLflow tracking
+            if tracker:
+                tracker.log_metric(f"{heuristic_key}_hits_at_10", hits_at_10)
+                tracker.log_metric(f"{heuristic_key}_hits_at_20", hits_at_20)
+                tracker.log_metric(f"{heuristic_key}_hits_at_50", hits_at_50)
+                tracker.log_metric(f"{heuristic_key}_hits_at_100", hits_at_100)
+                tracker.log_metric(f"{heuristic_key}_median_rank", median_rank)
+                tracker.log_metric(f"{heuristic_key}_mean_rank", mean_rank)
+                tracker.log_metric(f"{heuristic_key}_mrr", mrr)
+                tracker.log_artifact(str(json_path))
+            
             results[heuristic_name] = {
-                'hits_at_k': hits,
+                'hits_at_10': hits_at_10,
+                'hits_at_20': hits_at_20,
+                'hits_at_50': hits_at_50,
+                'hits_at_100': hits_at_100,
                 'mean_rank': mean_rank,
                 'median_rank': median_rank,
-                'k': k,
-                'total_true': len(true_drugs)
+                'mrr': mrr,
+                'total_true': n,
+                'total_drugs': total_drugs,
             }
         
         # Summary comparison
         print(f"\n{'='*70}")
         print("SUMMARY COMPARISON")
         print(f"{'='*70}")
-        print(f"{'Heuristic':<20} {'Hits@'+str(k):<12} {'Mean Rank':<12} {'Median Rank':<12}")
-        print("-" * 60)
+        print(f"{'Heuristic':<20} {'Hits@10':<10} {'Hits@20':<10} {'Hits@50':<10} {'MRR':<10} {'Med.Rank':<10}")
+        print("-" * 70)
         
-        for name, metrics in results.items():
-            hits_str = f"{metrics['hits_at_k']}/{metrics['total_true']}"
-            print(f"{name:<20} {hits_str:<12} {metrics['mean_rank']:<12.1f} {metrics['median_rank']:<12.1f}")
+        for name, m in results.items():
+            print(f"{name:<20} {m['hits_at_10']:<10} {m['hits_at_20']:<10} "
+                  f"{m['hits_at_50']:<10} {m['mrr']:<10.4f} {m['median_rank']:<10.1f}")
         
         return results
 
 
 def main():
+    import datetime as dt
+    
     parser = argparse.ArgumentParser(description="Heuristic baselines for link prediction")
     parser.add_argument('--target-node', type=str, required=True,
                         help='Disease ID to evaluate (e.g., EFO_0003854)')
     parser.add_argument('--k', type=int, default=20,
                         help='K for Hits@K metric (default: 20)')
+    parser.add_argument("--no-mlflow", action="store_true",
+                        help="Disable MLflow experiment tracking")
     
     args = parser.parse_args()
     
+    # MLflow tracking
+    tracker = None
+    if not args.no_mlflow:
+        from src.training.tracker import ExperimentTracker
+        tracker = ExperimentTracker(
+            experiment_name=f"Heuristic-{args.target_node}",
+        )
+        run_name = f"heuristic_{dt.datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        tracker.start_run(run_name=run_name)
+        print(f"MLflow tracking enabled: Heuristic-{args.target_node} / {run_name}")
+        tracker.log_param("method", "heuristic")
+        tracker.log_param("target_disease", args.target_node)
+    
     baseline = HeuristicBaseline()
     baseline.load_graph()
-    baseline.evaluate_loo(args.target_node, k=args.k)
+    baseline.evaluate_loo(args.target_node, k=args.k, tracker=tracker)
+    
+    if tracker:
+        tracker.end_run()
+        print("Ended MLflow run.")
 
 
 if __name__ == "__main__":
     main()
+
