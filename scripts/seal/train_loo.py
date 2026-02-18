@@ -9,16 +9,18 @@ but uses subgraph-based classification instead of full-graph embeddings.
 """
 
 import argparse
+import copy
 from collections import defaultdict
+from datetime import datetime, timezone
 import glob
 import json
 import random
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
 import torch
+from sklearn.metrics import roc_auc_score
 from torch_geometric.loader import DataLoader
 from tqdm import tqdm
 
@@ -85,16 +87,13 @@ def sample_negatives_hard(
     max_cn: int = None,
 ) -> list:
     """Hard negative sampling: select pairs with high common-neighbour count.
-    
+
     Pairs with many common neighbours but no direct edge are the hardest
     to classify and produce the most informative gradients.
     """
     future_positives = future_positives or set()
     forbidden = positive_set | future_positives
     adj = _build_adjacency(edge_index)
-
-    drug_set = set(all_drug_list)
-    disease_set = set(all_disease_list)
 
     # Score all candidate negative pairs by common-neighbour count
     print("    Computing common neighbours for hard negatives...")
@@ -167,7 +166,7 @@ def sample_negatives_mixed(
 
 def train_seal_leave_one_out(
     target_disease: str = "EFO_0003854",
-    num_hops: int = 1,
+    num_hops: int = 2,
     hidden_channels: int = 32,
     num_layers: int = 3,
     epochs: int = 50,
@@ -186,6 +185,13 @@ def train_seal_leave_one_out(
     max_z: int = MAX_Z,
     dropout: float = 0.5,
     max_nodes_per_hop: int = 200,
+    val_ratio: float = 0.1,
+    patience: int = 10,
+    pos_weight: float = None,
+    grad_clip: float = 1.0,
+    warmup_epochs: int = 5,
+    use_jk: bool = False,
+    use_node_types: bool = True,
 ):
     """Train SEAL with leave-one-out validation for *target_disease*."""
     torch.manual_seed(seed)
@@ -209,8 +215,30 @@ def train_seal_leave_one_out(
         drug_mapping = {k: int(v) for k, v in json.load(f).items()}
     with open(f"{mappings_path}/disease_key_mapping.json") as f:
         disease_mapping = {k: int(v) for k, v in json.load(f).items()}
+    with open(f"{mappings_path}/gene_key_mapping.json") as f:
+        gene_mapping = {k: int(v) for k, v in json.load(f).items()}
 
     idx_to_drug = {v: k for k, v in drug_mapping.items()}
+
+    # ── 1b. Build node-type features (drug=0, gene=1, disease=2) ──
+    if use_node_types:
+        print("Building node-type features...")
+        node_type = torch.zeros(graph_data.num_nodes, dtype=torch.long)
+        for idx in drug_mapping.values():
+            node_type[idx] = 0
+        for idx in gene_mapping.values():
+            node_type[idx] = 1
+        for idx in disease_mapping.values():
+            node_type[idx] = 2
+        # One-hot encode (3 types)
+        node_type_features = torch.nn.functional.one_hot(node_type, num_classes=3).float()
+        # Append to existing node features
+        if node_features is not None:
+            node_features = torch.cat([node_features.float(), node_type_features], dim=1)
+        else:
+            node_features = node_type_features
+        print(f"  Node features: {node_features.shape[1]} dims "
+              f"(original + 3 node-type indicators)")
 
     target_idx = disease_mapping.get(target_disease)
     if target_idx is None:
@@ -236,13 +264,26 @@ def train_seal_leave_one_out(
 
     # Split: edges for target disease are test; everything else is train
     test_edges = [e for e in drug_disease_edges if e[1] == target_idx]
-    train_edges = [e for e in drug_disease_edges if e[1] != target_idx]
-    print(f"  Train edges: {len(train_edges)}")
-    print(f"  Test edges:  {len(test_edges)}")
+    all_train_edges = [e for e in drug_disease_edges if e[1] != target_idx]
 
     if len(test_edges) == 0:
         print(f"\n  WARNING: No test edges for {target_disease}. "
               "LOO validation will have no ground truth to evaluate against.")
+
+    # ── 2b. Validation split ────────────────────────────────────────────
+    if val_ratio > 0 and len(all_train_edges) > 20:
+        n_val = max(1, int(len(all_train_edges) * val_ratio))
+        random.shuffle(all_train_edges)
+        val_edges = all_train_edges[:n_val]
+        train_edges = all_train_edges[n_val:]
+        print(f"  Train edges: {len(train_edges)}")
+        print(f"  Val edges:   {len(val_edges)}")
+        print(f"  Test edges:  {len(test_edges)}")
+    else:
+        train_edges = all_train_edges
+        val_edges = []
+        print(f"  Train edges: {len(train_edges)}")
+        print(f"  Test edges:  {len(test_edges)}")
 
     # ── 3. Negative sampling ────────────────────────────────────────────
     all_drug_list = list(drug_indices)
@@ -250,10 +291,11 @@ def train_seal_leave_one_out(
     positive_set = set(drug_disease_edges)
 
     # Pollution control: don't sample held-out test edges as negatives
-    future_positives = set(test_edges)
+    future_positives = set(test_edges) | set(val_edges)
     num_neg = len(train_edges) * neg_ratio
 
-    print(f"\nSampling {num_neg} negative edges (strategy={neg_strategy}, ratio=1:{neg_ratio})...")
+    print(f"\nSampling {num_neg} negative edges "
+          f"(strategy={neg_strategy}, ratio=1:{neg_ratio})...")
 
     if neg_strategy == "hard":
         neg_train_edges = sample_negatives_hard(
@@ -275,9 +317,31 @@ def train_seal_leave_one_out(
 
     print(f"  Sampled {len(neg_train_edges)} negative edges")
 
-    # ── 3b. Create training-only edge index (CRITICAL: avoid test leakage) ──
-    # Only remove DRUG→target_disease edges (the ones we predict).
-    # Keep gene-disease, gene-gene, etc. edges for structural context.
+    # Validation negatives (same strategy and ratio as training)
+    if val_edges:
+        num_val_neg = len(val_edges) * neg_ratio
+        exclude_set = positive_set | set(neg_train_edges)
+        if neg_strategy == "hard":
+            neg_val_edges = sample_negatives_hard(
+                exclude_set, all_drug_list, all_disease_list, num_val_neg,
+                edge_index, exclude_disease=target_idx,
+                future_positives=future_positives,
+            )
+        elif neg_strategy == "mixed":
+            neg_val_edges = sample_negatives_mixed(
+                exclude_set, all_drug_list, all_disease_list, num_val_neg,
+                edge_index, exclude_disease=target_idx,
+                future_positives=future_positives, hard_ratio=hard_ratio,
+            )
+        else:  # random
+            neg_val_edges = sample_negatives_random(
+                exclude_set, all_drug_list, all_disease_list, num_val_neg,
+                exclude_disease=target_idx, future_positives=future_positives,
+            )
+        print(f"  Val negatives: {len(neg_val_edges)}")
+
+    # ── 3b. Create training-only edge index ──
+    # Only remove drug-disease edges
     print("\nCreating training-only edge index for subgraph extraction...")
     src, dst = edge_index
     is_drug = torch.zeros(graph_data.num_nodes, dtype=torch.bool)
@@ -319,6 +383,29 @@ def train_seal_leave_one_out(
         train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers,
     )
 
+    # Validation dataset
+    val_loader = None
+    if val_edges:
+        print("Initialising SEAL validation dataset...")
+        val_pairs = val_edges + neg_val_edges
+        val_labels = [1] * len(val_edges) + [0] * len(neg_val_edges)
+        val_dataset = SEALDataset(
+            root=f"{cache_root}/{target_disease}",
+            pairs=val_pairs,
+            labels=val_labels,
+            edge_index=train_edge_index,
+            node_features=node_features,
+            num_hops=num_hops,
+            max_z=max_z,
+            max_nodes_per_hop=max_nodes_per_hop,
+            adj_dict=adj_dict,
+            use_cache=False,
+            save_cache=False,
+        )
+        val_loader = DataLoader(
+            val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
+        )
+
     # ── 5. Model setup ──────────────────────────────────────────────────
     first_batch = next(iter(train_loader))
     in_channels = first_batch.x.shape[1]
@@ -331,40 +418,105 @@ def train_seal_leave_one_out(
         pooling=pooling,
         k=sort_k,
         conv_type=conv_type,
+        use_jk=use_jk,
     )
     optimiser = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
-    criterion = torch.nn.BCEWithLogitsLoss()
 
-    # Cosine annealing LR scheduler
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimiser, T_max=epochs, eta_min=lr / 100)
+    # Loss with optional positive weighting
+    if pos_weight is not None:
+        pw = torch.tensor([pos_weight])
+        criterion = torch.nn.BCEWithLogitsLoss(pos_weight=pw)
+        print(f"  Using pos_weight={pos_weight}")
+    else:
+        criterion = torch.nn.BCEWithLogitsLoss()
+
+    # Cosine annealing LR scheduler (with warmup)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimiser, T_max=max(1, epochs - warmup_epochs), eta_min=lr / 100,
+    )
 
     print(f"\nModel: {model.__class__.__name__}")
     print(f"  Conv type: {conv_type}, Layers: {num_layers}, Hidden: {hidden_channels}")
     print(f"  Pooling: {pooling}" + (f" (k={sort_k})" if pooling == "sort" else ""))
+    print(f"  JKNet: {use_jk}, Node types: {use_node_types}")
     print(f"  Dropout: {dropout}, LR: {lr}, Weight Decay: {weight_decay}")
+    print(f"  Warmup: {warmup_epochs} epochs, Grad clip: {grad_clip}")
     print(f"  max_z: {max_z}, Feature dim: {in_channels}")
     total_params = sum(p.numel() for p in model.parameters())
     print(f"  Total parameters: {total_params:,}")
+    if val_loader:
+        print(f"  Early stopping: patience={patience}")
 
-    # ── 6. Training loop ────────────────────────────────────────────────
-    print(f"\nTraining SEAL model for {epochs} epochs...", flush=True)
+    # ── 6. Training loop with early stopping ────────────────────────────
+    print(f"\nTraining SEAL model for up to {epochs} epochs...", flush=True)
+    best_val_auc = 0.0
+    best_model_state = None
+    epochs_without_improvement = 0
+
     for epoch in range(epochs):
         model.train()
         total_loss = 0
+
+        # Learning rate warmup
+        if epoch < warmup_epochs:
+            warmup_lr = lr * (epoch + 1) / warmup_epochs
+            for pg in optimiser.param_groups:
+                pg['lr'] = warmup_lr
+
         for batch in train_loader:
             optimiser.zero_grad()
             out = model(batch)
             loss = criterion(out, batch.y)
             loss.backward()
+            if grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
             optimiser.step()
             total_loss += loss.item()
 
-        scheduler.step()
+        if epoch >= warmup_epochs:
+            scheduler.step()
+
+        avg_loss = total_loss / len(train_loader)
+        current_lr = optimiser.param_groups[0]['lr']
+
+        # ── Validation step ──
+        val_auc = None
+        if val_loader and (epoch + 1) % 2 == 0:
+            model.eval()
+            val_preds, val_labels_list = [], []
+            with torch.no_grad():
+                for batch in val_loader:
+                    out = torch.sigmoid(model(batch))
+                    val_preds.extend(out.tolist())
+                    val_labels_list.extend(batch.y.tolist())
+            try:
+                val_auc = roc_auc_score(val_labels_list, val_preds)
+            except ValueError:
+                val_auc = 0.5  # degenerate case
+
+            if val_auc > best_val_auc:
+                best_val_auc = val_auc
+                best_model_state = copy.deepcopy(model.state_dict())
+                epochs_without_improvement = 0
+            else:
+                epochs_without_improvement += 2  # checked every 2 epochs
 
         if (epoch + 1) % 5 == 0:
-            avg_loss = total_loss / len(train_loader)
-            current_lr = scheduler.get_last_lr()[0]
-            print(f"  Epoch {epoch + 1}/{epochs}, Loss: {avg_loss:.4f}, LR: {current_lr:.6f}", flush=True)
+            status = f"  Epoch {epoch + 1}/{epochs}, Loss: {avg_loss:.4f}, LR: {current_lr:.6f}"
+            if val_auc is not None:
+                status += f", Val AUC: {val_auc:.4f} (best: {best_val_auc:.4f})"
+            print(status, flush=True)
+
+        # Early stopping
+        if patience > 0 and epochs_without_improvement >= patience:
+            print(f"\n  Early stopping at epoch {epoch + 1} "
+                  f"(no val improvement for {patience} epochs)")
+            break
+
+    # Restore best model if we used validation
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+        print(f"  Restored best model (Val AUC: {best_val_auc:.4f})")
 
     # ── 7. Ranking evaluation ───────────────────────────────────────────
     print(f"\nEvaluating: ranking all {len(all_drug_list)} drugs for {target_disease}...",
@@ -406,34 +558,82 @@ def train_seal_leave_one_out(
     hits_at_10 = sum(1 for r in ranks if r <= 10)
     hits_at_20 = sum(1 for r in ranks if r <= 20)
     hits_at_50 = sum(1 for r in ranks if r <= 50)
+    hits_at_100 = sum(1 for r in ranks if r <= 100)
     median_rank = float(torch.tensor(ranks, dtype=torch.float).median()) if ranks else 9999.0
     mean_rank = float(torch.tensor(ranks, dtype=torch.float).mean()) if ranks else 9999.0
+    mrr = float(torch.tensor([1.0 / r for r in ranks]).mean()) if ranks else 0.0
+
+    n = len(true_drugs)
+    total_drugs = len(all_drug_list)
 
     print(f"\nTop 20 Predictions:")
     print(f"{'Rank':<6} {'Drug ID':<20} {'Score':<10} {'True?'}")
     print("-" * 60)
+    top20_list = []
     for rank, (drug_idx, score) in enumerate(drug_scores[:20], 1):
         drug_id = idx_to_drug.get(drug_idx, "Unknown")
-        mark = "✓ True" if drug_idx in true_drugs else ""
+        is_true = drug_idx in true_drugs
+        mark = "✓ True" if is_true else ""
         print(f"{rank:<6} {drug_id:<20} {score:<10.4f} {mark}")
+        top20_list.append({"rank": rank, "drug_id": drug_id, "score": round(score, 4), "true": is_true})
 
-    n = len(true_drugs)
     print(f"\n{'=' * 60}")
     print(f"SEAL PERFORMANCE SUMMARY FOR {target_disease}")
     print(f"{'=' * 60}")
     print(f"  Test Edges (True Positives): {n}")
-    print(f"  Config: {conv_type} | {pooling} | hidden={hidden_channels} | layers={num_layers}")
+    print(f"  Total Drugs Ranked: {total_drugs}")
+    print(f"  Config: {conv_type} | {pooling} | hidden={hidden_channels} | "
+          f"layers={num_layers} | hops={num_hops}")
     print(f"  Sampling: {neg_strategy} | ratio=1:{neg_ratio}" +
           (f" | hard_ratio={hard_ratio}" if neg_strategy == "mixed" else ""))
+    if val_edges:
+        print(f"  Best Val AUC: {best_val_auc:.4f}")
     if n > 0:
-        print(f"  Hits@10: {hits_at_10} / {n} ({hits_at_10 / n * 100:.1f}%)")
-        print(f"  Hits@20: {hits_at_20} / {n} ({hits_at_20 / n * 100:.1f}%)")
-        print(f"  Hits@50: {hits_at_50} / {n} ({hits_at_50 / n * 100:.1f}%)")
+        print(f"  Hits@10:  {hits_at_10} / {n} ({hits_at_10 / n * 100:.1f}%)")
+        print(f"  Hits@20:  {hits_at_20} / {n} ({hits_at_20 / n * 100:.1f}%)")
+        print(f"  Hits@50:  {hits_at_50} / {n} ({hits_at_50 / n * 100:.1f}%)")
+        print(f"  Hits@100: {hits_at_100} / {n} ({hits_at_100 / n * 100:.1f}%)")
     else:
         print(f"  Hits@K: No test edges available")
     print(f"  Median Rank: {median_rank:.1f}")
     print(f"  Mean Rank: {mean_rank:.1f}")
+    print(f"  MRR: {mrr:.4f}")
     print(f"{'=' * 60}\n")
+
+    # ── 9. Save results to file ─────────────────────────────────────────
+    results_dir = Path(cache_root).parent / "seal_results"
+    results_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+
+    results_json = {
+        "target_disease": target_disease,
+        "timestamp": timestamp,
+        "config": {
+            "conv_type": conv_type, "pooling": pooling,
+            "hidden": hidden_channels, "layers": num_layers,
+            "hops": num_hops, "epochs": epochs,
+            "neg_strategy": neg_strategy, "neg_ratio": neg_ratio,
+            "hard_ratio": hard_ratio if neg_strategy == "mixed" else None,
+            "use_jk": use_jk, "dropout": dropout,
+            "seed": seed, "max_nodes_per_hop": max_nodes_per_hop,
+        },
+        "metrics": {
+            "best_val_auc": round(best_val_auc, 4) if val_edges else None,
+            "hits_at_10": hits_at_10, "hits_at_20": hits_at_20,
+            "hits_at_50": hits_at_50, "hits_at_100": hits_at_100,
+            "total_true": n, "total_drugs": total_drugs,
+            "median_rank": round(median_rank, 1),
+            "mean_rank": round(mean_rank, 1),
+            "mrr": round(mrr, 4),
+        },
+        "top20": top20_list,
+        "all_ranks": sorted(ranks),
+    }
+
+    json_path = results_dir / f"seal_{target_disease}_{timestamp}.json"
+    with open(json_path, "w") as f:
+        json.dump(results_json, f, indent=2)
+    print(f"Results saved to: {json_path}")
 
     return model, median_rank, hits_at_20
 
@@ -456,11 +656,17 @@ if __name__ == "__main__":
     parser.add_argument("--dropout", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--workers", type=int, default=0, help="DataLoader workers")
+    parser.add_argument("--pos-weight", type=float, default=None,
+                        help="Positive class weight for BCE loss")
+    parser.add_argument("--grad-clip", type=float, default=1.0,
+                        help="Max gradient norm (0 to disable)")
+    parser.add_argument("--warmup-epochs", type=int, default=5,
+                        help="LR warmup epochs before cosine decay")
 
     # Architecture
     parser.add_argument("--hidden", type=int, default=32, help="Hidden channels")
     parser.add_argument("--layers", type=int, default=3, help="Number of GNN layers")
-    parser.add_argument("--hops", type=int, default=1, help="Subgraph extraction hops")
+    parser.add_argument("--hops", type=int, default=2, help="Subgraph extraction hops")
     parser.add_argument("--max-nodes-per-hop", type=int, default=200,
                         help="Max neighbours sampled per hop (caps subgraph size)")
     parser.add_argument("--pooling", type=str, default="mean+max",
@@ -469,10 +675,14 @@ if __name__ == "__main__":
     parser.add_argument("--sort-k", type=int, default=30,
                         help="k for SortAggregation (only used if --pooling=sort)")
     parser.add_argument("--conv", type=str, default="sage",
-                        choices=["sage", "gcn", "gin"],
+                        choices=["sage", "gcn", "gin", "gat"],
                         help="GNN convolution type")
     parser.add_argument("--max-z", type=int, default=MAX_Z,
                         help="Max DRNL label (controls one-hot dimensionality)")
+    parser.add_argument("--use-jk", action="store_true",
+                        help="Use JKNet-style layer concatenation")
+    parser.add_argument("--no-node-types", action="store_true",
+                        help="Disable node-type features")
 
     # Negative sampling
     parser.add_argument("--neg-strategy", type=str, default="mixed",
@@ -482,6 +692,12 @@ if __name__ == "__main__":
                         help="Ratio of negatives to positives (e.g. 3 means 1:3)")
     parser.add_argument("--hard-ratio", type=float, default=0.5,
                         help="Proportion of hard negatives in mixed mode (0.0-1.0)")
+
+    # Validation
+    parser.add_argument("--val-ratio", type=float, default=0.1,
+                        help="Fraction of train edges to hold out for validation")
+    parser.add_argument("--patience", type=int, default=10,
+                        help="Early stopping patience (0 to disable)")
 
     args = parser.parse_args()
 
@@ -506,4 +722,11 @@ if __name__ == "__main__":
         max_z=args.max_z,
         dropout=args.dropout,
         max_nodes_per_hop=args.max_nodes_per_hop,
+        val_ratio=args.val_ratio,
+        patience=args.patience,
+        pos_weight=args.pos_weight,
+        grad_clip=args.grad_clip,
+        warmup_epochs=args.warmup_epochs,
+        use_jk=args.use_jk,
+        use_node_types=not args.no_node_types,
     )

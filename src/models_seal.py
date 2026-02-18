@@ -23,7 +23,7 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import shortest_path
 from torch.utils.data import Dataset as TorchDataset
 from torch_geometric.data import Data
-from torch_geometric.nn import GCNConv, SAGEConv, GINConv, global_max_pool, global_mean_pool
+from torch_geometric.nn import GATConv, GCNConv, SAGEConv, GINConv, global_max_pool, global_mean_pool
 from torch_geometric.nn.aggr import SortAggregation
 from torch_geometric.utils import k_hop_subgraph
 
@@ -197,11 +197,13 @@ class SEALModel(nn.Module):
         pooling: str = "sort",
         k: int = 30,
         conv_type: str = "sage",
+        use_jk: bool = False,
     ):
         super().__init__()
         self.num_layers = num_layers
         self.pooling = pooling
         self.k = k
+        self.use_jk = use_jk
 
         # GNN layers — choose convolution type
         def make_conv(in_c, out_c):
@@ -210,6 +212,8 @@ class SEALModel(nn.Module):
             elif conv_type == "gin":
                 mlp = nn.Sequential(nn.Linear(in_c, out_c), nn.ReLU(), nn.Linear(out_c, out_c))
                 return GINConv(mlp)
+            elif conv_type == "gat":
+                return GATConv(in_c, out_c, heads=1, concat=False)
             else:  # default: sage
                 return SAGEConv(in_c, out_c)
 
@@ -221,18 +225,27 @@ class SEALModel(nn.Module):
         self.bns = nn.ModuleList([nn.BatchNorm1d(hidden_channels) for _ in range(num_layers)])
         self.dropout = nn.Dropout(dropout_rate)
 
+        # Skip-connection projection (if input dim != hidden dim)
+        if in_channels != hidden_channels:
+            self.skip_proj = nn.Linear(in_channels, hidden_channels, bias=False)
+        else:
+            self.skip_proj = None
+
         # Readout layer
         if pooling == "sort":
             self.sort_aggr = SortAggregation(k=k)
         self.pooling_name = pooling
 
+        # Effective hidden dim for MLP: if JK, concat all layers
+        effective_hidden = hidden_channels * num_layers if use_jk else hidden_channels
+
         # MLP classifier
         if pooling == "sort":
-            mlp_in = k * hidden_channels
+            mlp_in = k * effective_hidden
         elif pooling == "mean+max":
-            mlp_in = hidden_channels * 2
+            mlp_in = effective_hidden * 2
         else:
-            mlp_in = hidden_channels
+            mlp_in = effective_hidden
 
         self.mlp = nn.Sequential(
             nn.Linear(mlp_in, hidden_channels),
@@ -248,12 +261,25 @@ class SEALModel(nn.Module):
         """
         x, edge_index, batch = data.x, data.edge_index, data.batch
 
+        layer_outputs = []
         for i in range(self.num_layers):
+            x_in = x
             x = self.convs[i](x, edge_index)
             x = self.bns[i](x)
             if i < self.num_layers - 1:
                 x = F.relu(x)
                 x = self.dropout(x)
+            # Skip / residual connection
+            if i == 0 and self.skip_proj is not None:
+                x = x + self.skip_proj(x_in)
+            elif i > 0:
+                x = x + x_in
+            if self.use_jk:
+                layer_outputs.append(x)
+
+        # JKNet: concatenate all layer outputs
+        if self.use_jk:
+            x = torch.cat(layer_outputs, dim=-1)
 
         # Graph-level readout
         if self.pooling_name == "sort":
