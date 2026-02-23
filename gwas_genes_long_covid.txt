@@ -1,33 +1,108 @@
-ENSG00000137166   # FOXP4
-ENSG00000236418   # HLA-DQA1
-ENSG00000196735   # HLA-DQA1
-ENSG00000225890   # HLA-DQA1
-ENSG00000179344   # HLA-DQB1
-ENSG00000231286   # HLA-DQB1
-ENSG00000231939   # HLA-DQB1
-ENSG00000233209   # HLA-DQB1
-ENSG00000175164   # ABO
-ENSG00000171634   # BPTF
-ENSG00000182481   # KPNA2
-ENSG00000186665   # C17orf58
-ENSG00000153214   # TMEM87B
-ENSG00000144152   # FBLN7
-ENSG00000218336   # TENM3
-ENSG00000128610   # FEZF1
-ENSG00000081803   # CADPS2
-ENSG00000080298   # RFX3
-ENSG00000293604   # ORAI1
-ENSG00000188735   # TMEM120B
-ENSG00000204398   # RP11-65D24.2  (lncRNA; also annotated as ENSG00000305993 in some releases)
-ENSG00000187720   # THSD4
-ENSG00000130638   # ATXN10
-ENSG00000123360   # PDE1B (this for sure is in the graph, as a sanity check)
-ENSG00000163817   # SLC6A20
-ENSG00000073849   # ST6GAL1
-ENSG00000181143   # MUC16
-ENSG00000176920   # FUT2
-ENSG00000171124   # FUT3
-ENSG00000242808   # SOX2-OT
-ENSG00000171119   # NRTN
-ENSG00000153162   # BMP6
-ENSG00000099246   # RAB18
+# Long COVID Gene-Disease Edges for Knowledge Graph
+# Curated from multi-ancestry GWAS, combinatorial analysis, and causal inference
+# Updated: 2026-02-19
+#
+# SELECTION CRITERIA:
+#   - Include: GWAS lead signals, combinatorial OR genes, prioritised categories 1-3,
+#     and specific causal driver genes with moderate graph degree (< ~300 edges)
+#   - Exclude: Mega-hub genes (TP53, MAPK1, SRC, EP300, CREBBP, etc.) that would
+#     dominate SEAL subgraphs and create shortcuts to every drug
+#   - Borderline: TYK2 (280 edges) included due to direct therapeutic relevance (JAK pathway)
+#
+# FORMAT: ENSEMBL_ID  # SYMBOL  | Category | Score/OR
+
+# === GWAS Lead Signals (multi-ancestry validated) ===
+ENSG00000137166   # FOXP4      | GWAS_OR=1.63   | Lead signal; Lung/Hypothalamus
+ENSG00000196735   # HLA-DQA1   | GWAS_OR=1.06   | MHC-II; Antigen presentation
+ENSG00000179344   # HLA-DQB1   | GWAS_OR=1.06   | MHC-II; Adaptive immunity
+ENSG00000175164   # ABO        | GWAS_OR=0.95   | Protective; Thrombo-inflammation
+ENSG00000171634   # BPTF       | GWAS_OR=0.95   | Protective; Chromatin signaling
+ENSG00000182481   # KPNA2      | GWAS_OR=0.95   | Protective; Viral propagation
+ENSG00000164308   # ADCY8      | GWAS_OR=1.32   | UK Biobank validated; Memory
+ENSG00000102755   # FLT1       | GWAS_OR=0.84   | Protective; Cardiovascular
+ENSG00000166833   # NAV2       | GWAS_OR=0.78   | Protective effect
+
+# === Combinatorial OR (gene-gene interaction signals) ===
+ENSG00000121057   # AKAP1      | Comb_OR=3.17   | Mitochondrial/Fatigue
+ENSG00000134852   # CLOCK      | Comb_OR=4.47   | Circadian rhythm
+
+# === Prioritised Category 1: Core COVID mechanisms ===
+ENSG00000130234   # ACE2       | Cat1           | Viral entry receptor
+ENSG00000184012   # TMPRSS2    | Cat1           | Viral priming protease
+ENSG00000142002   # DPP9       | Cat1           | Lung fibrosis
+ENSG00000105397   # TYK2       | Cat1           | JAK signaling (therapeutic target)
+ENSG00000163817   # SLC6A20    | Cat1           | Severe COVID risk
+ENSG00000204525   # HLA-C      | Cat1           | Male-biased response
+ENSG00000106327   # TFR2       | Cat1           | Female-biased response
+ENSG00000176358   # TAC4       | Cat1           | Female-biased response
+ENSG00000159110   # IFNAR2     | Cat1           | Interferon response
+
+# === Prioritised Category 2: Shared risk with acute COVID ===
+ENSG00000111331   # OAS3       | Cat2           | Shared risk; innate immunity
+ENSG00000198743   # SLC5A3     | Cat2           | Shared risk; osmolyte transport
+ENSG00000133661   # SFTPD      | Cat2           | Shared risk; surfactant protein
+
+# === Prioritised Category 3: Symptom-specific (neuro/fatigue) ===
+ENSG00000183775   # KCTD16     | Cat3           | Mild-specific neurological
+ENSG00000132970   # WASF3      | Cat3           | Fatigue/Mitochondria
+ENSG00000169760   # NLGN1      | Cat3           | Synapse/Brain fog
+ENSG00000145920   # CPLX2      | Cat3           | Vesicle/Brain fog
+ENSG00000185737   # NRG3       | Cat3           | Brain-related
+ENSG00000067798   # NAV3       | Cat3           | Brain-related
+ENSG00000151320   # AKAP6      | Cat3           | Brain-related
+ENSG00000101463   # SYNDIG1    | Cat3           | Brain-related
+ENSG00000181195   # PENK       | Cat3           | Sex-biased
+
+# === Selected Causal Drivers (degree < 300, specific pathology) ===
+ENSG00000124762   # CDKN1A     | Causal         | Cellular senescence
+ENSG00000169083   # AR         | Causal         | Sex-biased hub
+ENSG00000065457   # ADAT1      | Causal         | Neurological trajectory
+ENSG00000026950   # BTN3A1     | Causal         | Pulmonary/Autoimmune
+ENSG00000158825   # CDA        | Causal         | Endothelial dysfunction
+ENSG00000090661   # CERS4      | Causal         | Metabolic/Vascular
+ENSG00000010810   # FYN        | Causal         | Signaling kinase
+ENSG00000184983   # NDUFA6     | Causal         | Mitochondrial complex I
+ENSG00000170027   # YWHAG      | Causal         | 14-3-3 signaling
+ENSG00000177025   # C19orf18   | Causal         | Mitochondrial link
+ENSG00000176386   # CDC26      | Causal         | Vascular link
+ENSG00000139714   # MORN3      | Causal         | Vascular link
+ENSG00000132507   # EIF5A      | Causal         | Translation factor
+
+# === Combinatorial (symptom subtype markers) ===
+ENSG00000134532   # SOX5       | Combinatorial  | Severe fatigue
+ENSG00000181092   # ADIPOQ     | Combinatorial  | Metabolic/Protective
+ENSG00000171105   # INSR       | Combinatorial  | Fatigue subtype
+ENSG00000144619   # CNTN4      | Combinatorial  | General PASC
+
+# === User's Own Genes (from project-specific analysis) ===
+ENSG00000163817   # SLC6A20    | Own            | Amino acid transport; COVID risk locus
+ENSG00000073849   # ST6GAL1    | Own            | Sialyltransferase; Immune regulation
+ENSG00000181143   # MUC16      | Own            | Mucin; Epithelial barrier
+ENSG00000176920   # FUT2       | Own            | Fucosyltransferase; Secretor status
+ENSG00000171124   # FUT3       | Own            | Fucosyltransferase; Lewis antigen
+ENSG00000242808   # SOX2-OT    | Own            | lncRNA; Stem cell regulation (not in graph)
+ENSG00000171119   # NRTN       | Own            | Neurturin; Neurotrophic factor
+ENSG00000153162   # BMP6       | Own            | Bone morphogenetic protein; Iron regulation
+ENSG00000099246   # RAB18      | Own            | Rab GTPase; Vesicle trafficking
+
+# === EXCLUDED (mega-hub genes, degree > 500): ===
+# ENSG00000141510  # TP53     degree=2058 — too connected
+# ENSG00000100393  # EP300    degree=1300 — too connected
+# ENSG00000100030  # MAPK1    degree=1164 — too connected
+# ENSG00000197122  # SRC      degree=1104 — too connected
+# ENSG00000005339  # CREBBP   degree=1090 — too connected
+# ENSG00000177885  # GRB2     degree=686  — too connected
+# ENSG00000166949  # SMAD3    degree=552  — too connected
+# ENSG00000116473  # HDAC1    degree=526  — too connected
+# ENSG00000139687  # RB1      degree=506  — too connected
+# ENSG00000175387  # SMAD2    degree=404  — too connected
+# ENSG00000136869  # TLR4     degree=400  — too connected
+# ENSG00000101266  # CSNK2A1  degree=226  — borderline, excluded for safety
+# ENSG00000213076  # C17orf58 — not in graph
+# ENSG00000175171  # PPA1     — not in graph
+# ENSG00000155256  # NPFFR1   — not in graph
+# ENSG00000144930  # SLC6A11  — not in graph
+# ENSG00000144961  # NXPE3    — not in graph
+# ENSG00000163341  # VWDE     — not in graph
+# ENSG00000164237  # GMPPB    — not in graph
+# ENSG00000091839  # ESR1     — not in graph
