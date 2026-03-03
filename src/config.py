@@ -117,7 +117,8 @@ class Config:
             'use_disease_similarity': True,       # Enable disease-disease edges (shared parents)
             'disease_similarity_max_children': 10, # Max children per parent for disease similarity (higher = less specific)
             'disease_similarity_min_shared': 1,   # Min shared parents required to create edge (1 = share at least one parent)
-            'trial_edges': True                   # Link molecules to linkedDiseases metadata (additional drug-disease edges)
+            'trial_edges': True,                  # Link molecules to linkedDiseases metadata (additional drug-disease edges)
+            'propagate_drug_edges': 'none',       # Propagate drug-disease edges down ontology: 'none', 'fill-gaps', 'all'
         }
         
         # Explainer settings

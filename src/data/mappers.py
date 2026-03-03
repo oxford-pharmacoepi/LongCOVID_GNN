@@ -16,7 +16,7 @@ class IdMapper:
     """
     
     def __init__(self):
-        """Initialize with predefined redundant ID mappings."""
+        """Initialise with predefined redundant ID mappings."""
         self.redundant_id_mapping = self._get_redundant_id_mappings()
     
     def _get_redundant_id_mappings(self):
@@ -103,7 +103,7 @@ class IdMapper:
         if isinstance(value, str):
             try:
                 return ast.literal_eval(value)
-            except:
+            except (ValueError, SyntaxError):
                 return []
         
         # Handle lists and tuples
@@ -154,7 +154,7 @@ class NodeIndexMapper:
     """
     
     def __init__(self):
-        """Initialize node index mapper."""
+        """Initialise node index mapper."""
         pass
     
     def create_node_mappings(self, molecule_df, disease_df, gene_table, version):
@@ -189,7 +189,7 @@ class NodeIndexMapper:
                     if isinstance(pathways, str):
                         try:
                             pathways = ast.literal_eval(pathways)
-                        except:
+                        except (ValueError, SyntaxError):
                             continue
                     if isinstance(pathways, list):
                         reactome_list.extend(pathways)
@@ -203,7 +203,7 @@ class NodeIndexMapper:
                 if isinstance(areas, str):
                     try:
                         areas = ast.literal_eval(areas)
-                    except:
+                    except (ValueError, SyntaxError):
                         continue
                 if isinstance(areas, list) or isinstance(areas, np.ndarray):
                     therapeutic_area_list.extend(areas)

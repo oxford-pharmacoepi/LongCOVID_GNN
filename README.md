@@ -21,7 +21,7 @@ LongCOVID_GNN/
 ├── src/                              # Core framework modules
 │   ├── models.py                     # GNN architectures (GCN, GraphSAGE, Transformer)
 │   ├── utils.py                      # Evaluation metrics and utilities
-│   ├── config.py                     # Centralized configuration
+│   ├── config.py                     # Centralised configuration
 │   ├── data_processing.py            # Data loading and preprocessing
 │   ├── negative_sampling.py          # Negative sampling strategies
 │   ├── bayesian_optimiser.py         # Bayesian hyperparameter optimisation
@@ -102,7 +102,7 @@ This executes:
 1. Graph construction from processed data
 2. Model training (GCN, GraphSAGE, Transformer)
 3. Temporal validation and testing
-4. Evaluation and visualization
+4. Evaluation and visualisation
 
 ### Long COVID Drug Repurposing
 
@@ -138,7 +138,7 @@ uv run python scripts/1_create_graph.py
 # With options
 uv run python scripts/1_create_graph.py \
     --force-mode processed \
-    --analyze \
+    --analyse \
     --experiment-name graph_creation_v1
 ```
 
@@ -271,14 +271,14 @@ class Config:
 ## Model Architectures
 
 ### GCN (Graph Convolutional Network)
-- Spectral convolution using normalized adjacency matrix
+- Spectral convolution using normalised adjacency matrix
 - Fast inference, good baseline performance
 - Best for: Homogeneous graphs with uniform node types
 
 ### GraphSAGE (Sample and Aggregate)
 - Inductive learning via neighborhood sampling
 - Handles large graphs efficiently
-- Best for: Scalability and generalization
+- Best for: Scalability and generalisation
 
 ### Graph Transformer
 - Multi-head attention over graph structure
@@ -293,7 +293,7 @@ class Config:
 - May include trivial negatives
 
 ### Hard Negative Sampling
-- Prioritizes high-similarity but disconnected pairs
+- Prioritises high-similarity but disconnected pairs
 - More challenging training examples
 - Improves model discrimination
 
@@ -325,7 +325,7 @@ Then navigate to `http://localhost:5000`
 **Tracked information:**
 - Hyperparameters (learning rate, architecture, sampling strategy)
 - Metrics (AUC, APR, F1 per epoch)
-- Artifacts (trained models, visualizations, predictions)
+- Artifacts (trained models, visualisations, predictions)
 - System info (runtime, GPU usage, Python environment)
 
 ## Output Files
@@ -339,7 +339,7 @@ Then navigate to `http://localhost:5000`
 ### Model Checkpoints
 `results/models/{ModelName}_best_model_{timestamp}.pt`
 - State dict of trained model parameters
-- Optimizer state for resuming training
+- Optimiser state for resuming training
 - Training metrics history
 
 ### Evaluation Results
@@ -406,7 +406,7 @@ The Long COVID pipeline (`long_covid_drug_repurposing.py`):
 
 See [License.md](License.md) for details.
 
-## Acknowledgments
+## Acknowledgements
 
 - [Open Targets Platform](https://www.opentargets.org/) - Biomedical knowledge graph data
 

@@ -2,16 +2,10 @@
 Main Graph Builder orchestrator.
 """
 
-import os
 import torch
 import datetime as dt
 import pandas as pd
-import numpy as np
-import ast
-import re
 from torch_geometric.data import Data
-import torch_geometric.transforms as T
-from torch_geometric.utils import remove_isolated_nodes, subgraph, dropout_adj
 
 from src.data_processing import DataProcessor, detect_data_mode
 from src.features.node import NodeFeatureBuilder
@@ -105,6 +99,24 @@ class GraphBuilder:
         molecule_df = molecule_table.to_pandas()
         disease_df = disease_table.to_pandas()
         
+        # Load full disease hierarchy (including parents) for propagation.
+        # The loader filters to leaf diseases (descendants==0), but propagation
+        # needs parent diseases to push their drug edges down to descendants.
+        propagation_mode = self.config.network_config.get('propagate_drug_edges', 'none')
+        if propagation_mode != 'none':
+            import glob
+            import pyarrow.parquet as pq
+            import pyarrow as pa
+            disease_path = self.config.paths['diseases']
+            all_files = sorted(glob.glob(f"{disease_path}/*.parquet"))
+            all_tables = [pq.read_table(f) for f in all_files]
+            full_disease_table = pa.concat_tables(all_tables)
+            self.all_diseases_df = full_disease_table.to_pandas()
+            print(f"  Full disease hierarchy loaded: {len(self.all_diseases_df)} diseases "
+                  f"(vs {len(disease_df)} leaf diseases in graph)")
+        else:
+            self.all_diseases_df = None
+        
         # Apply ID mappings and filtering
         self.molecule_df, self.indication_df = self.processor.apply_id_mappings(molecule_df, indication_df)
         self.molecule_df = self.processor.filter_linked_molecules(self.molecule_df, self.indication_df, self.known_drugs_df)
@@ -149,7 +161,7 @@ class GraphBuilder:
                     if isinstance(res, list):
                         return [str(x) for x in res]
                     return [str(res)]
-                except:
+                except (ValueError, SyntaxError):
                     inner = val[1:-1].strip()
                     if not inner: return []
                     if ',' not in inner:
@@ -195,7 +207,8 @@ class GraphBuilder:
             self.molecule_df,
             self.indication_df,
             self.disease_df,
-            self.known_drugs_df
+            self.known_drugs_df,
+            all_diseases_df=getattr(self, 'all_diseases_df', None),
         )
         
     def create_train_val_test_splits(self):

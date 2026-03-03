@@ -14,6 +14,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 import glob
 import json
+import os
 import random
 import sys
 from pathlib import Path
@@ -194,6 +195,10 @@ def train_seal_leave_one_out(
     use_jk: bool = False,
     use_node_types: bool = True,
     mlflow_tracking: bool = True,
+    failed_rcts_file: str = None,
+    use_edge_features: bool = False,
+    exclude_edge_types: list = None,
+    no_node_features: bool = False,
 ):
     """Train SEAL with leave-one-out validation for *target_disease*."""
     torch.manual_seed(seed)
@@ -216,15 +221,21 @@ def train_seal_leave_one_out(
 
     # ── 1. Load graph and mappings ──────────────────────────────────────
     print("Finding graph...")
-    graph_files = sorted(glob.glob("results/graph_*_processed_*.pt"))
+    graph_files = sorted(glob.glob("results/graph_*.pt"))
     if not graph_files:
-        raise FileNotFoundError("No processed graph found in results/")
+        raise FileNotFoundError("No graph found in results/")
     graph_path = graph_files[-1]
     print(f"  Using: {graph_path}")
 
     graph_data = torch.load(graph_path, weights_only=False)
     edge_index = graph_data.edge_index
     node_features = graph_data.x
+    global_edge_attr = graph_data.edge_attr if use_edge_features and hasattr(graph_data, 'edge_attr') else None
+    if global_edge_attr is not None:
+        print(f"  Edge features: {global_edge_attr.shape} (enabled)")
+    elif use_edge_features:
+        print("  WARNING: --use-edge-features requested but graph has no edge_attr")
+        global_edge_attr = None
 
     mappings_path = graph_path.replace(".pt", "_mappings")
     with open(f"{mappings_path}/drug_key_mapping.json") as f:
@@ -236,7 +247,59 @@ def train_seal_leave_one_out(
 
     idx_to_drug = {v: k for k, v in drug_mapping.items()}
 
-    # ── 1b. Build node-type features (drug=0, gene=1, disease=2) ──
+    # ── 1b. Edge-type ablation: remove specific edge types ──
+    if exclude_edge_types:
+        print(f"\nEdge-type ablation: excluding {exclude_edge_types}")
+        src_ei, dst_ei = edge_index
+        drug_set = set(drug_mapping.values())
+        gene_set = set(gene_mapping.values())
+        disease_set = set(disease_mapping.values())
+
+        # Precompute node-type tensors for fast masking
+        is_drug_t = torch.zeros(graph_data.num_nodes, dtype=torch.bool)
+        is_gene_t = torch.zeros(graph_data.num_nodes, dtype=torch.bool)
+        is_disease_t = torch.zeros(graph_data.num_nodes, dtype=torch.bool)
+        is_drug_t[list(drug_set)] = True
+        is_gene_t[list(gene_set)] = True
+        is_disease_t[list(disease_set)] = True
+
+        keep_mask = torch.ones(edge_index.shape[1], dtype=torch.bool)
+        before = edge_index.shape[1]
+
+        for etype in exclude_edge_types:
+            etype = etype.lower().replace('_', '-').replace(' ', '-')
+            if etype == 'ppi' or etype == 'gene-gene':
+                mask = is_gene_t[src_ei] & is_gene_t[dst_ei]
+                keep_mask &= ~mask
+                print(f"    Removing gene-gene (PPI): {mask.sum().item()} edges")
+            elif etype == 'drug-gene' or etype == 'moa':
+                mask = (is_drug_t[src_ei] & is_gene_t[dst_ei]) | \
+                       (is_gene_t[src_ei] & is_drug_t[dst_ei])
+                keep_mask &= ~mask
+                print(f"    Removing drug-gene (MoA): {mask.sum().item()} edges")
+            elif etype == 'disease-gene' or etype == 'dg':
+                mask = (is_disease_t[src_ei] & is_gene_t[dst_ei]) | \
+                       (is_gene_t[src_ei] & is_disease_t[dst_ei])
+                keep_mask &= ~mask
+                print(f"    Removing disease-gene: {mask.sum().item()} edges")
+            elif etype == 'disease-similarity' or etype == 'dd':
+                mask = is_disease_t[src_ei] & is_disease_t[dst_ei]
+                keep_mask &= ~mask
+                print(f"    Removing disease-disease: {mask.sum().item()} edges")
+            else:
+                print(f"    WARNING: unknown edge type '{etype}', skipping")
+
+        edge_index = edge_index[:, keep_mask]
+        if global_edge_attr is not None:
+            global_edge_attr = global_edge_attr[keep_mask]
+        print(f"  Edges: {before} → {edge_index.shape[1]} "
+              f"(removed {before - edge_index.shape[1]})")
+
+    # ── 1c. Build node-type features (drug=0, gene=1, disease=2) ──
+    if no_node_features:
+        print("Node feature ablation: using ONLY node-type indicators (no original features)")
+        node_features = None  # will be replaced below if use_node_types
+
     if use_node_types:
         print("Building node-type features...")
         node_type = torch.zeros(graph_data.num_nodes, dtype=torch.long)
@@ -249,12 +312,15 @@ def train_seal_leave_one_out(
         # One-hot encode (3 types)
         node_type_features = torch.nn.functional.one_hot(node_type, num_classes=3).float()
         # Append to existing node features
-        if node_features is not None:
+        if node_features is not None and not no_node_features:
             node_features = torch.cat([node_features.float(), node_type_features], dim=1)
         else:
             node_features = node_type_features
-        print(f"  Node features: {node_features.shape[1]} dims "
-              f"(original + 3 node-type indicators)")
+        print(f"  Node features: {node_features.shape[1]} dims")
+    elif no_node_features:
+        # No node types and no node features — DRNL-only
+        print("  Node features: NONE (DRNL structural labels only)")
+        node_features = None
 
     target_idx = disease_mapping.get(target_disease)
     if target_idx is None:
@@ -365,9 +431,12 @@ def train_seal_leave_one_out(
     leakage_mask = ((is_drug[src]) & (dst == target_idx)) | \
                    ((is_drug[dst]) & (src == target_idx))
     train_edge_index = edge_index[:, ~leakage_mask]
+    train_edge_attr = global_edge_attr[~leakage_mask] if global_edge_attr is not None else None
     print(f"  Full graph edges: {edge_index.shape[1]}")
     print(f"  Drug-disease edges removed for target: {leakage_mask.sum().item()}")
     print(f"  Edges kept (incl. gene-disease context): {train_edge_index.shape[1]}")
+    if train_edge_attr is not None:
+        print(f"  Training edge features shape: {train_edge_attr.shape}")
 
     # ── 3c. Build adjacency dict for fast subgraph extraction ──
     print("Building adjacency dict for fast neighbour lookups...")
@@ -394,6 +463,7 @@ def train_seal_leave_one_out(
         max_z=max_z,
         max_nodes_per_hop=max_nodes_per_hop,
         adj_dict=adj_dict,
+        edge_attr=train_edge_attr,
     )
     train_loader = DataLoader(
         train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers,
@@ -406,7 +476,7 @@ def train_seal_leave_one_out(
         val_pairs = val_edges + neg_val_edges
         val_labels = [1] * len(val_edges) + [0] * len(neg_val_edges)
         val_dataset = SEALDataset(
-            root=f"{cache_root}/{target_disease}",
+            root=f"{cache_root}/{target_disease}_val",
             pairs=val_pairs,
             labels=val_labels,
             edge_index=train_edge_index,
@@ -417,6 +487,7 @@ def train_seal_leave_one_out(
             adj_dict=adj_dict,
             use_cache=False,
             save_cache=False,
+            edge_attr=train_edge_attr,
         )
         val_loader = DataLoader(
             val_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
@@ -430,6 +501,7 @@ def train_seal_leave_one_out(
     first_batch = next(iter(train_loader))
     in_channels = first_batch.x.shape[1]
 
+    edge_dim = train_edge_attr.shape[1] if train_edge_attr is not None else 0
     model = SEALModel(
         in_channels=in_channels,
         hidden_channels=hidden_channels,
@@ -439,6 +511,7 @@ def train_seal_leave_one_out(
         k=sort_k,
         conv_type=conv_type,
         use_jk=use_jk,
+        edge_dim=edge_dim,
     )
     optimiser = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
@@ -606,6 +679,7 @@ def train_seal_leave_one_out(
         adj_dict=adj_dict,
         use_cache=False,
         save_cache=False,
+        edge_attr=train_edge_attr,
     )
     eval_loader = DataLoader(
         eval_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
@@ -670,6 +744,86 @@ def train_seal_leave_one_out(
     print(f"  MRR: {mrr:.4f}")
     print(f"{'=' * 60}\n")
 
+    # ── 8b. Failed RCT analysis (if file provided) ──────────────────────
+    rct_results = None
+    if failed_rcts_file and os.path.exists(failed_rcts_file):
+        failed_drugs = []  # (drug_id, name, trial, outcome)
+        success_drugs = []
+        with open(failed_rcts_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    # Check for commented-out success drugs
+                    if line.startswith('# ') and '\t' in line:
+                        parts = line[2:].split('\t')
+                        if len(parts) >= 5 and parts[4].strip() == 'success':
+                            if parts[0].strip() == target_disease:
+                                success_drugs.append(parts[1:5])
+                    continue
+                parts = line.split('\t')
+                if len(parts) >= 5 and parts[0] == target_disease:
+                    failed_drugs.append(tuple(parts[1:5]))
+
+        if failed_drugs or success_drugs:
+            print(f"\n{'=' * 60}")
+            print(f"FAILED RCT ANALYSIS FOR {target_disease}")
+            print(f"{'=' * 60}")
+            rct_results = {"failed": [], "success": []}
+
+            if failed_drugs:
+                print(f"\n  Expected FAILURES (should rank LOW):")
+                print(f"  {'Drug':<25s} {'Rank':>6} {'Score':>8} {'Trial':<20s} {'Outcome'}")
+                print(f"  {'-' * 75}")
+                failed_ranks = []
+                for drug_id, name, trial, outcome in failed_drugs:
+                    drug_idx = drug_mapping.get(drug_id)
+                    if drug_idx is not None:
+                        drug_idx = int(drug_idx)
+                        rank = rank_map.get(drug_idx, total_drugs)
+                        score = dict(drug_scores).get(drug_idx, 0.0)
+                        print(f"  {name:<25s} {rank:>6} {score:>8.4f} {trial:<20s} {outcome}")
+                        failed_ranks.append(rank)
+                        rct_results["failed"].append({
+                            "drug_id": drug_id, "name": name, "trial": trial,
+                            "outcome": outcome, "rank": rank, "score": round(score, 4)
+                        })
+                    else:
+                        print(f"  {name:<25s} {'N/A':>6} {'N/A':>8} {trial:<20s} (not in graph)")
+                if failed_ranks:
+                    print(f"\n  Failed drug median rank: {sorted(failed_ranks)[len(failed_ranks)//2]}")
+                    print(f"  Failed drug mean rank:   {sum(failed_ranks)/len(failed_ranks):.1f}")
+
+            if success_drugs:
+                print(f"\n  Expected SUCCESSES (should rank HIGH):")
+                print(f"  {'Drug':<25s} {'Rank':>6} {'Score':>8} {'Trial'}")
+                print(f"  {'-' * 55}")
+                success_ranks = []
+                for drug_id, name, trial, outcome in success_drugs:
+                    drug_idx = drug_mapping.get(drug_id)
+                    if drug_idx is not None:
+                        drug_idx = int(drug_idx)
+                        rank = rank_map.get(drug_idx, total_drugs)
+                        score = dict(drug_scores).get(drug_idx, 0.0)
+                        print(f"  {name:<25s} {rank:>6} {score:>8.4f} {trial}")
+                        success_ranks.append(rank)
+                        rct_results["success"].append({
+                            "drug_id": drug_id, "name": name, "trial": trial,
+                            "rank": rank, "score": round(score, 4)
+                        })
+                    else:
+                        print(f"  {name:<25s} {'N/A':>6} {'N/A':>8} {trial} (not in graph)")
+                if success_ranks:
+                    print(f"\n  Success drug median rank: {sorted(success_ranks)[len(success_ranks)//2]}")
+
+            # Separation metric
+            if failed_ranks and success_ranks:
+                mean_fail = sum(failed_ranks) / len(failed_ranks)
+                mean_succ = sum(success_ranks) / len(success_ranks)
+                print(f"\n  Rank separation ratio: {mean_fail / mean_succ:.1f}x "
+                      f"(>1 means failed drugs rank lower = good)")
+
+            print(f"\n{'=' * 60}\n")
+
     # ── 9. Save results to file ─────────────────────────────────────────
     results_dir = Path(cache_root).parent / "seal_results"
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -698,6 +852,7 @@ def train_seal_leave_one_out(
         },
         "top20": top20_list,
         "all_ranks": sorted(ranks),
+        "rct_analysis": rct_results,
     }
 
     json_path = results_dir / f"seal_{target_disease}_{timestamp}.json"
@@ -791,6 +946,20 @@ if __name__ == "__main__":
     parser.add_argument("--no-mlflow", action="store_true",
                         help="Disable MLflow experiment tracking")
 
+    # Failed RCT analysis
+    parser.add_argument("--failed-rcts", type=str, default=None,
+                        help="Path to failed_rcts.txt for negative validation")
+
+    # Edge features
+    parser.add_argument("--use-edge-features", action="store_true",
+                        help="Use graph edge features (edge_attr) in SEAL model")
+
+    # Ablation
+    parser.add_argument("--exclude-edge-types", type=str, nargs="+", default=None,
+                        help="Edge types to remove: ppi, drug-gene, disease-gene, disease-similarity")
+    parser.add_argument("--no-node-features", action="store_true",
+                        help="Disable original node features (use only DRNL + optional node types)")
+
     args = parser.parse_args()
 
     train_seal_leave_one_out(
@@ -822,4 +991,8 @@ if __name__ == "__main__":
         use_jk=args.use_jk,
         use_node_types=not args.no_node_types,
         mlflow_tracking=not args.no_mlflow,
+        failed_rcts_file=args.failed_rcts,
+        use_edge_features=args.use_edge_features,
+        exclude_edge_types=args.exclude_edge_types,
+        no_node_features=args.no_node_features,
     )

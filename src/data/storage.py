@@ -19,7 +19,7 @@ class DataStorage:
     """
     
     def __init__(self):
-        """Initialize data storage."""
+        """Initialise data storage."""
         pass
     
     def save_processed_data(self, data_dict, output_dir):

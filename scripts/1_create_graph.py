@@ -23,16 +23,29 @@ def main():
     """Main function."""
     parser = argparse.ArgumentParser(description='Create drug-disease prediction graph')
     parser.add_argument('--output-dir', type=str, default='results/', help='Output directory')
-    parser.add_argument('--analyze', action='store_true', help='Run graph analysis')
+    parser.add_argument('--analyse', action='store_true', help='Run graph analysis')
     parser.add_argument('--force-mode', type=str, choices=['raw', 'processed'], 
                         help='Force specific data processing mode (raw or processed)')
     parser.add_argument('--experiment-name', type=str, default='graph_creation',
                         help='MLflow experiment name')
+    parser.add_argument('--propagate-drug-edges', type=str, default=None,
+                        choices=['none', 'fill-gaps', 'all'],
+                        help='Propagate drug-disease edges down the ontology: '
+                             'none=current behaviour, fill-gaps=only to leaves with 0 drugs, '
+                             'all=to all descendant leaves')
+    parser.add_argument('--extra-drug-disease-sources', action='store_true', default=False,
+                        help='Include extra drug-disease edge sources (knownDrugsAggregated Ph3/4, '
+                             'molecule.linkedDiseases). Default: only approved indications.')
     
     args = parser.parse_args()
     
     # Load configuration from config.py
     config = get_config()
+    
+    # Override config with CLI args
+    if args.propagate_drug_edges is not None:
+        config.network_config['propagate_drug_edges'] = args.propagate_drug_edges
+    config.network_config['use_extra_drug_disease_sources'] = args.extra_drug_disease_sources
     
     # Update output path if specified
     if args.output_dir:
@@ -54,7 +67,7 @@ def main():
         
         # Log additional graph creation parameters
         tracker.log_param("force_mode", args.force_mode if args.force_mode else "auto")
-        tracker.log_param("analyze_graph", args.analyze)
+        tracker.log_param("analyse_graph", args.analyse)
         tracker.log_param("output_dir", args.output_dir)
         
         # Create graph
@@ -86,7 +99,7 @@ def main():
         print(f"Final mappings saved to: {mappings_result_path}")
         
         # Run analysis if requested
-        if args.analyze:
+        if args.analyse:
             print("\nRunning graph analysis...")
             analysis_results = standard_graph_analysis(graph)
             

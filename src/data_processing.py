@@ -29,7 +29,7 @@ class DataProcessor:
     def __init__(self, config):
         self.config = config
         
-        # Initialize new modular components
+        # Initialise new modular components
         self.loader = OpenTargetsLoader(config)
         self.id_mapper = IdMapper()
         self.node_mapper = NodeIndexMapper()

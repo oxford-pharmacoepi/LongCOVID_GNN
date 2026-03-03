@@ -17,7 +17,7 @@ class OpenTargetsLoader:
     """
     
     def __init__(self, config=None):
-        """Initialize the loader."""
+        """Initialise the loader."""
         self.config = config
     
     def load_indication_data(self, path):

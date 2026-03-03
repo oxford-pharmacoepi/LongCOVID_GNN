@@ -82,7 +82,7 @@ def query_chembl_molecule(chembl_id, max_retries=3):
                         syn_data = syn_response.json()
                         synonyms = syn_data.get('molecule_synonyms', [])
                         if synonyms:
-                            # Prioritize trade names and INN
+                            # Prioritise trade names and INN
                             trade_names = [s['molecule_synonym'] for s in synonyms 
                                          if s.get('syn_type') == 'TRADE_NAME']
                             inn_names = [s['molecule_synonym'] for s in synonyms 
@@ -93,7 +93,7 @@ def query_chembl_molecule(chembl_id, max_retries=3):
                             info['trade_names'] = trade_names
                             info['inn_names'] = inn_names
                             info['other_synonyms'] = other_names[:5]  # Limit to first 5
-                except:
+                except (requests.exceptions.RequestException, ValueError):
                     pass
                 
                 return info

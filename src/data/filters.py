@@ -15,7 +15,7 @@ class MoleculeFilter:
     """
     
     def __init__(self):
-        """Initialize molecule filter."""
+        """Initialise molecule filter."""
         pass
     
     def filter_linked_molecules(self, molecule_df, indication_df, known_drugs_df=None):
@@ -65,7 +65,7 @@ class AssociationFilter:
     """
     
     def __init__(self):
-        """Initialize association filter."""
+        """Initialise association filter."""
         pass
     
     def filter_by_score(self, associations_table, score_column, threshold=0.1):

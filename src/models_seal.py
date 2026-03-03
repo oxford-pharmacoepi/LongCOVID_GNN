@@ -96,6 +96,7 @@ def extract_enclosing_subgraph(
     max_nodes_per_hop: Optional[int] = 200,
     max_z: int = MAX_Z,
     adj_dict: Optional[dict] = None,
+    edge_attr: Optional[torch.Tensor] = None,
 ) -> Tuple[Data, int, int]:
     """Extract the *k*-hop enclosing subgraph around a candidate link.
 
@@ -104,11 +105,17 @@ def extract_enclosing_subgraph(
 
     If *adj_dict* is provided (node → set of neighbours), it is used for fast
     neighbour lookup instead of scanning all edges.
+    
+    If *edge_attr* is provided (global edge features), the corresponding
+    features for subgraph edges are included in the returned Data object.
     """
     # Remove the target link to ensure clean extraction
     mask = ~((edge_index[0] == src) & (edge_index[1] == dst))
     mask &= ~((edge_index[0] == dst) & (edge_index[1] == src))
     clean_edge_index = edge_index[:, mask]
+    clean_edge_attr = edge_attr[:, mask] if edge_attr is not None and edge_attr.dim() == 2 else (
+        edge_attr[mask] if edge_attr is not None else None
+    )
 
     if max_nodes_per_hop is not None:
         # Hop-by-hop expansion with neighbour sampling
@@ -152,12 +159,18 @@ def extract_enclosing_subgraph(
         remap[node_tensor] = torch.arange(len(node_list))
         local_edge_index = torch.stack([remap[kept_s], remap[kept_d]]) if kept_s.numel() > 0 else torch.zeros((2, 0), dtype=torch.long)
 
+        # Carry edge features for the kept edges
+        local_edge_attr = None
+        if clean_edge_attr is not None and kept_s.numel() > 0:
+            local_edge_attr = clean_edge_attr[edge_mask] if clean_edge_attr.dim() == 1 else clean_edge_attr[edge_mask]
+
         nodes = node_tensor
         rel_src = node_map[src]
         rel_dst = node_map[dst]
+        edge_mask_for_attr = edge_mask  # store for use below
     else:
         # Standard PyG k-hop subgraph (no sampling)
-        nodes, local_edge_index, mapping, _ = k_hop_subgraph(
+        nodes, local_edge_index, mapping, edge_mask_for_attr = k_hop_subgraph(
             node_idx=[src, dst],
             num_hops=num_hops,
             edge_index=clean_edge_index,
@@ -165,6 +178,7 @@ def extract_enclosing_subgraph(
         )
         rel_src = mapping[0].item()
         rel_dst = mapping[1].item()
+        local_edge_attr = clean_edge_attr[edge_mask_for_attr] if clean_edge_attr is not None else None
 
     n = nodes.size(0)
 
@@ -173,6 +187,8 @@ def extract_enclosing_subgraph(
 
     # Features are constructed on-the-fly in SEALDataset to save disk space
     subgraph_data = Data(edge_index=local_edge_index, z=z, num_nodes=n, nodes=nodes)
+    if local_edge_attr is not None:
+        subgraph_data.edge_attr = local_edge_attr
     return subgraph_data, rel_src, rel_dst
 
 
@@ -198,16 +214,31 @@ class SEALModel(nn.Module):
         k: int = 30,
         conv_type: str = "sage",
         use_jk: bool = False,
+        edge_dim: int = 0,
     ):
         super().__init__()
         self.num_layers = num_layers
         self.pooling = pooling
         self.k = k
         self.use_jk = use_jk
+        self.edge_dim = edge_dim
+
+        # Edge feature projection (if edge features are used)
+        if edge_dim > 0:
+            self.edge_proj = nn.Linear(edge_dim, hidden_channels)
+        else:
+            self.edge_proj = None
 
         # GNN layers — choose convolution type
+        # When edge features are enabled, use GATConv with edge_dim for all types
+        # (since SAGEConv/GCNConv/GINConv don't natively support edge_attr)
+        actual_edge_dim = hidden_channels if edge_dim > 0 else None
+
         def make_conv(in_c, out_c):
-            if conv_type == "gcn":
+            if edge_dim > 0:
+                # Use GATConv with edge features for best edge_attr integration
+                return GATConv(in_c, out_c, heads=1, concat=False, edge_dim=actual_edge_dim)
+            elif conv_type == "gcn":
                 return GCNConv(in_c, out_c)
             elif conv_type == "gin":
                 mlp = nn.Sequential(nn.Linear(in_c, out_c), nn.ReLU(), nn.Linear(out_c, out_c))
@@ -261,10 +292,18 @@ class SEALModel(nn.Module):
         """
         x, edge_index, batch = data.x, data.edge_index, data.batch
 
+        # Project edge features if available
+        edge_attr_proj = None
+        if self.edge_proj is not None and hasattr(data, 'edge_attr') and data.edge_attr is not None:
+            edge_attr_proj = self.edge_proj(data.edge_attr.float())
+
         layer_outputs = []
         for i in range(self.num_layers):
             x_in = x
-            x = self.convs[i](x, edge_index)
+            if edge_attr_proj is not None:
+                x = self.convs[i](x, edge_index, edge_attr=edge_attr_proj)
+            else:
+                x = self.convs[i](x, edge_index)
             x = self.bns[i](x)
             if i < self.num_layers - 1:
                 x = F.relu(x)
@@ -324,6 +363,7 @@ class SEALDataset(TorchDataset):
         save_cache: bool = True,
         transform=None,
         pre_transform=None,
+        edge_attr: Optional[torch.Tensor] = None,
     ):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -337,6 +377,7 @@ class SEALDataset(TorchDataset):
         self.adj_dict = adj_dict
         self.use_cache = use_cache
         self.save_cache = save_cache
+        self.edge_attr = edge_attr  # Global edge features (passed to subgraph extraction)
 
         # Fallback feature dimension for dummy graphs
         self.feature_dim = max_z
@@ -344,7 +385,8 @@ class SEALDataset(TorchDataset):
             self.feature_dim += node_features.size(1)
 
         # Cache hash uses shape + content signature to avoid stale hits
-        edge_sig = f"{edge_index.shape}_{edge_index[:, :5].tolist()}_{edge_index[:, -5:].tolist()}"
+        ea_tag = f"_ea{edge_attr.shape[1]}" if edge_attr is not None and edge_attr.dim() == 2 else ""
+        edge_sig = f"{edge_index.shape}_{edge_index[:, :5].tolist()}_{edge_index[:, -5:].tolist()}{ea_tag}"
         graph_hash = hashlib.md5(edge_sig.encode()).hexdigest()[:12]
         self.cache_dir = self.root / f"cache_{graph_hash}_hops{num_hops}_mnph{max_nodes_per_hop}"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -375,19 +417,23 @@ class SEALDataset(TorchDataset):
                     num_hops=self.num_hops, max_z=max_z,
                     max_nodes_per_hop=self.max_nodes_per_hop,
                     adj_dict=self.adj_dict,
+                    edge_attr=self.edge_attr,
                 )
                 # Save minimal topo to cache
                 if self.save_cache:
                     torch.save(subgraph, cache_file)
             except Exception:
                 # Return a minimal dummy graph to preserve batch alignment
-                return Data(
+                dummy = Data(
                     x=torch.zeros((1, self.feature_dim), dtype=torch.float),
                     edge_index=torch.zeros((2, 0), dtype=torch.long),
                     z=torch.zeros((1,), dtype=torch.long),
                     y=torch.tensor([label], dtype=torch.float),
                     num_nodes=1,
                 )
+                if self.edge_attr is not None and self.edge_attr.dim() == 2:
+                    dummy.edge_attr = torch.zeros((0, self.edge_attr.shape[1]), dtype=torch.float)
+                return dummy
 
         # Reconstruct features on-the-fly
         z = subgraph.z

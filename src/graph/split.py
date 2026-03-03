@@ -14,7 +14,7 @@ class DataSplitter:
     
     def __init__(self, config, processor):
         """
-        Initialize data splitter.
+        Initialise data splitter.
         
         Args:
             config: Configuration object

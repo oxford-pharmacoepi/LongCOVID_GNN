@@ -3,9 +3,6 @@ Edge construction and management.
 """
 
 import torch
-import os
-import pandas as pd
-import pyarrow as pa
 from src.utils.edge_utils import extract_edges
 from src.utils.graph_utils import custom_edges
 from src.features.edge import extract_moa_features
@@ -26,7 +23,7 @@ class GraphEdgeBuilder:
         self.processor = processor
         self.edges = {}
         
-    def build_edges(self, data_mode, mappings, molecule_df, indication_df, disease_df, known_drugs_df=None):
+    def build_edges(self, data_mode, mappings, molecule_df, indication_df, disease_df, known_drugs_df=None, all_diseases_df=None):
         """
         Build edges either by loading or extraction.
         
@@ -35,8 +32,9 @@ class GraphEdgeBuilder:
             mappings: Node mappings dictionary
             molecule_df: Molecule dataframe
             indication_df: Indication dataframe
-            disease_df: Disease dataframe
+            disease_df: Disease dataframe (filtered to graph leaves)
             known_drugs_df: Known drugs dataframe (optional)
+            all_diseases_df: Full disease hierarchy for propagation (optional)
             
         Returns:
             Tuple[torch.Tensor, torch.Tensor]: (concatenated_edge_index, edge_features)
@@ -46,7 +44,7 @@ class GraphEdgeBuilder:
         if data_mode == 'processed':
             self._load_edges()
         else:
-            self._extract_standard_edges(mappings, molecule_df, indication_df, disease_df, known_drugs_df)
+            self._extract_standard_edges(mappings, molecule_df, indication_df, disease_df, known_drugs_df, all_diseases_df=all_diseases_df)
         
         # Extract custom edges (re-generated even in processed mode as they depend on config filters)
         custom_edge_tensor = self._extract_custom_edges(mappings, molecule_df, disease_df)
@@ -125,7 +123,7 @@ class GraphEdgeBuilder:
         if 'gene_gene' in self.edges and self.edges['gene_gene'].size(1) > 0:
             torch.save(self.edges['gene_gene'], f"{edge_dir}7_gene_gene_edges.pt")
 
-    def _extract_standard_edges(self, mappings, molecule_df, indication_df, disease_df, known_drugs_df):
+    def _extract_standard_edges(self, mappings, molecule_df, indication_df, disease_df, known_drugs_df, all_diseases_df=None):
         """Extract all standard edge types."""
         import pyarrow as pa
         
@@ -147,8 +145,10 @@ class GraphEdgeBuilder:
         
         # 2. Drug-Disease (from multiple sources)
         print("Extracting Drug-Disease edges...")
+        # Use full hierarchy for propagation if available, else fall back to graph diseases
+        propagation_df = all_diseases_df if all_diseases_df is not None else disease_df
         self.edges['molecule_disease'] = self._extract_drug_disease_edges(
-            molecule_df, indication_table, known_drugs_df, mappings
+            molecule_df, indication_table, known_drugs_df, mappings, propagation_df
         )
         
         # 3. Drug-Gene
@@ -291,33 +291,172 @@ class GraphEdgeBuilder:
         return torch.tensor(list(edges_set), dtype=torch.long).t().contiguous()
 
 
-    def _extract_drug_disease_edges(self, molecule_df, indication_table, known_drugs_df, mappings):
+    def _extract_drug_disease_edges(self, molecule_df, indication_table, known_drugs_df, mappings, disease_df=None):
         """Extract drug-disease edges from indications, known drugs, and metadata."""
         # 1. Approved Indications
         ind_table = indication_table.select(['id', 'approvedIndications']).flatten()
         ind_edges = extract_edges(ind_table, mappings['drug_key_mapping'], mappings['disease_key_mapping'], return_edge_set=True)
         print(f"  - Edges from indications: {len(ind_edges)}")
         
-        # 2. Known Drugs (Clinical Trials Phase 3 and 4)
+        # 2. Known Drugs (Clinical Trials Phase 3 and 4) — optional
         known_edges = set()
-        if known_drugs_df is not None and not known_drugs_df.empty:
+        use_extra = self.config.network_config.get('use_extra_drug_disease_sources', False)
+        if use_extra and known_drugs_df is not None and not known_drugs_df.empty:
             valid_known = known_drugs_df[known_drugs_df['phase'] >= 3]
             valid_known_table = pa.Table.from_pandas(valid_known[['drugId', 'diseaseId']])
             known_edges = extract_edges(valid_known_table, mappings['drug_key_mapping'], mappings['disease_key_mapping'], return_edge_set=True)
             print(f"  - Edges from clinical trials (Ph 3/4): {len(known_edges)}")
         
-        # 3. Pre-linked diseases from molecule metadata
+        # 3. Pre-linked diseases from molecule metadata — optional
         meta_edges = set()
-        if 'linkedDiseases.rows' in molecule_df.columns:
+        if use_extra and 'linkedDiseases.rows' in molecule_df.columns:
             meta_table = pa.Table.from_pandas(molecule_df[['id', 'linkedDiseases.rows']])
             meta_edges = extract_edges(meta_table, mappings['drug_key_mapping'], mappings['disease_key_mapping'], return_edge_set=True)
             print(f"  - Edges from molecule metadata: {len(meta_edges)}")
         
+        if not use_extra:
+            print(f"  - Extra drug-disease sources disabled (approved indications only)")
+        
         # Merge all edges
         all_md_edges = ind_edges | known_edges | meta_edges
+        
+        # 4. Propagate drug-disease edges down the ontology hierarchy
+        propagation_mode = self.config.network_config.get('propagate_drug_edges', 'none')
+        if propagation_mode != 'none' and disease_df is not None:
+            propagated = self._propagate_drug_disease_edges(
+                all_md_edges, molecule_df, indication_table, known_drugs_df,
+                mappings, disease_df, mode=propagation_mode
+            )
+            all_md_edges |= propagated
+        
         # Sort edges for deterministic creation
         sorted_edges = sorted(list(all_md_edges))
         return torch.tensor(sorted_edges, dtype=torch.long).t().contiguous()
+
+    def _propagate_drug_disease_edges(self, existing_edges, molecule_df, indication_table,
+                                       known_drugs_df, mappings, disease_df, mode='all'):
+        """
+        Propagate drug-disease edges from parent diseases down to descendant leaves.
+
+        When a drug is associated with a parent disease (e.g., Rheumatoid Arthritis)
+        but that parent ID isn't in the graph as a leaf, this method finds the parent's
+        descendants that ARE in the graph and creates edges to them.
+
+        Args:
+            existing_edges: Set of (drug_idx, disease_idx) tuples already in graph
+            molecule_df: Drug molecule dataframe
+            indication_table: Indication data
+            known_drugs_df: Known drugs with clinical trial info
+            mappings: Node index mappings
+            disease_df: Disease dataframe with hierarchy fields
+            mode: 'all' (propagate to all descendants) or
+                  'fill-gaps' (only to descendants with 0 existing drug edges)
+        """
+        print(f"\n  Propagating drug-disease edges (mode={mode})...")
+        disease_map = mappings['disease_key_mapping']
+        drug_map = mappings['drug_key_mapping']
+        disease_ids_in_graph = set(disease_map.keys())
+
+        # Cap to avoid broad parents (e.g. "neoplasm") flooding the graph
+        max_descendants = 20
+
+        # Build disease -> descendants lookup from disease data
+        hierarchy = {}
+        skipped_broad = 0
+        if 'descendants' in disease_df.columns:
+            for _, row in disease_df.iterrows():
+                did = row.get('id') or row.get('diseaseId')
+                descs = row.get('descendants')
+                if did and descs is not None and hasattr(descs, '__len__') and len(descs) > 0:
+                    # Keep only descendants that exist in our graph
+                    mapped_desc = [d for d in descs if d in disease_ids_in_graph]
+                    if len(mapped_desc) > max_descendants:
+                        skipped_broad += 1
+                        continue  # Too broad — would add noise
+                    if mapped_desc:
+                        hierarchy[did] = mapped_desc
+            print(f"    Built hierarchy for {len(hierarchy)} diseases with graph-mapped descendants")
+            if skipped_broad:
+                print(f"    Skipped {skipped_broad} broad parents (>{max_descendants} descendants)")
+        else:
+            print("    WARNING: 'descendants' column not found in disease data, skipping propagation")
+            return set()
+
+        # Collect all drug-disease pairs from raw data (including unmapped diseases)
+        # These are the pairs where the disease ID ISN'T in our graph
+        unmapped_drug_disease = []  # (drug_chembl_id, disease_efo_id)
+
+        # From indications
+        if 'approvedIndications' in molecule_df.columns:
+            for _, row in molecule_df.iterrows():
+                drug_id = row['id']
+                if drug_id not in drug_map:
+                    continue
+                indications = row.get('approvedIndications')
+                if indications is None or not hasattr(indications, '__iter__'):
+                    continue
+                for dis_id in indications:
+                    if dis_id not in disease_ids_in_graph and dis_id in hierarchy:
+                        unmapped_drug_disease.append((drug_id, dis_id))
+
+        # From known drugs
+        if known_drugs_df is not None and not known_drugs_df.empty:
+            valid = known_drugs_df[known_drugs_df['phase'] >= 3]
+            for _, row in valid.iterrows():
+                drug_id = row.get('drugId')
+                dis_id = row.get('diseaseId')
+                if drug_id in drug_map and dis_id not in disease_ids_in_graph and dis_id in hierarchy:
+                    unmapped_drug_disease.append((drug_id, dis_id))
+
+        # From linked diseases
+        if 'linkedDiseases.rows' in molecule_df.columns:
+            for _, row in molecule_df.iterrows():
+                drug_id = row['id']
+                if drug_id not in drug_map:
+                    continue
+                linked = row.get('linkedDiseases.rows')
+                if linked is None or not hasattr(linked, '__iter__'):
+                    continue
+                for dis_id in linked:
+                    if dis_id not in disease_ids_in_graph and dis_id in hierarchy:
+                        unmapped_drug_disease.append((drug_id, dis_id))
+
+        # Deduplicate
+        unmapped_drug_disease = list(set(unmapped_drug_disease))
+        print(f"    Found {len(unmapped_drug_disease)} unmapped drug-disease pairs to propagate")
+
+        if not unmapped_drug_disease:
+            return set()
+
+        # For fill-gaps mode: compute which diseases already have drug edges
+        diseases_with_drugs = set()
+        if mode == 'fill-gaps':
+            for drug_idx, dis_idx in existing_edges:
+                diseases_with_drugs.add(dis_idx)
+
+        # Propagate
+        propagated_edges = set()
+        parent_counts = {}
+        for drug_id, parent_dis_id in unmapped_drug_disease:
+            drug_idx = drug_map[drug_id]
+            descendants = hierarchy[parent_dis_id]
+            for desc_id in descendants:
+                desc_idx = disease_map[desc_id]
+                edge = (drug_idx, desc_idx)
+                if edge in existing_edges:
+                    continue  # Already exists
+                if mode == 'fill-gaps' and desc_idx in diseases_with_drugs:
+                    continue  # Descendant already has drugs
+                propagated_edges.add(edge)
+                parent_counts[parent_dis_id] = parent_counts.get(parent_dis_id, 0) + 1
+
+        print(f"    Propagated {len(propagated_edges)} new drug-disease edges")
+        # Show top parent diseases by propagated edge count
+        top_parents = sorted(parent_counts.items(), key=lambda x: -x[1])[:10]
+        for pid, count in top_parents:
+            print(f"      {pid}: {count} propagated edges ({len(hierarchy.get(pid, []))} descendants)")
+
+        return propagated_edges
 
     def _extract_custom_edges(self, mappings, molecule_df, disease_df):
         """Extract custom edges (similarity, trials, etc.)."""

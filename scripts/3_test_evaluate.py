@@ -1150,7 +1150,7 @@ def main():
         print(f"\n" + "="*60)
         print("GNNEXPLAINER INTEGRATION")
         print("="*60)
-        print("To analyze FP predictions with GNNExplainer, run:")
+        print("To analyse FP predictions with GNNExplainer, run:")
         
         for model_name, results in test_results.items():
             if 'fp_export' in results:

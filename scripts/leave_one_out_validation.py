@@ -1576,7 +1576,7 @@ def main():
         validator.validate_top_diseases(n=args.top_diseases)
         
     elif not args.sample_size and not args.num_folds:
-        # 3. Default behavior if no arguments: Validate top 5 diseases
+        # 3. Default behaviour if no arguments: Validate top 5 diseases
         print("\nNo specific validation arguments provided.")
         print("Defaulting to: Validate Top 5 Diseases (Recommended for quick check)")
         validator.validate_top_diseases(n=5)

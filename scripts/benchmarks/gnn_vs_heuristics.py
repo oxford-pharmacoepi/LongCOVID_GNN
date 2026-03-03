@@ -33,7 +33,7 @@ configs = [
     {"model": "SAGE", "decoder": "mlp", "loss": "standard_bce", "hidden": 64},
     # SAGE with Heuristic Injection (The "Quick Win" hypothesis)
     {"model": "SAGE", "decoder": "mlp_neighbor", "loss": "standard_bce", "hidden": 64},
-    # SAGE with Ranking Loss (Better optimization)
+    # SAGE with Ranking Loss (Better optimisation)
     {"model": "SAGE", "decoder": "dot", "loss": "grouped_ranking_bce", "hidden": 64},
     # SAGE with Heuristics + Ranking Loss (Best of both worlds?)
     {"model": "SAGE", "decoder": "mlp_neighbor", "loss": "grouped_ranking_bce", "hidden": 64},
@@ -56,22 +56,22 @@ def parse_metrics(output):
             try:
                 parts = line.split(":")[-1].strip().split("/")
                 metrics['hits_at_20'] = int(parts[0].strip())
-            except: pass
+            except (ValueError, IndexError): pass
             
         if "Mean Rank:" in line:
             try:
                 metrics['mean_rank'] = float(line.split(":")[-1].strip())
-            except: pass
+            except (ValueError, IndexError): pass
             
         if "Median Rank:" in line:
             try:
                 metrics['median_rank'] = float(line.split(":")[-1].strip())
-            except: pass
+            except (ValueError, IndexError): pass
             
         if "MRR:" in line:
             try:
                 metrics['mrr'] = float(line.split(":")[-1].strip())
-            except: pass
+            except (ValueError, IndexError): pass
             
     return metrics
 
@@ -174,7 +174,7 @@ def run_benchmark():
         summary.to_csv(f"results/benchmark_summary_{timestamp}.csv")
         print(f"\nResults saved to results/benchmark_results_{timestamp}.csv")
     else:
-        print("No successful results to summarize.")
+        print("No successful results to summarise.")
 
 if __name__ == "__main__":
     run_benchmark()

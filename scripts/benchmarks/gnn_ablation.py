@@ -65,11 +65,11 @@ def parse_metrics(output):
         if "Hits@20" in line and "/" in line:
             try:
                 metrics['hits_at_20'] = int(line.split(":")[-1].strip().split("/")[0])
-            except: pass
+            except (ValueError, IndexError): pass
         if "Median Rank:" in line:
             try:
                 metrics['median_rank'] = float(line.split(":")[-1].strip())
-            except: pass
+            except (ValueError, IndexError): pass
     return metrics
 
 def run_benchmark():

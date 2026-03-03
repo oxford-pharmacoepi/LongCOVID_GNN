@@ -116,7 +116,7 @@ class TestEdgeExtractionFromRawData:
             assert found_count >= expected_in_graph * 0.7, \
                 f"Only found {found_count}/{expected_in_graph} edges for nodes in graph"
         else:
-            print("All sampled edges were filtered out - this is expected behavior")
+            print("All sampled edges were filtered out - this is expected behaviour")
     
     def test_self_loop_removal(self, shared_graph):
         """Ensure no self-loops exist in any edge type."""

@@ -57,7 +57,7 @@ def calculate_bootstrap_ci(y_true, y_pred_proba, y_pred_binary, n_bootstrap=1000
                 apr_score = average_precision_score(boot_y_true, boot_y_pred_proba)
                 bootstrap_metrics['auc'].append(auc_score)
                 bootstrap_metrics['apr'].append(apr_score)
-            except:
+            except (ValueError, TypeError):
                 # Skip this iteration if AUC/APR calculation fails
                 bootstrap_metrics['auc'].append(np.nan)
                 bootstrap_metrics['apr'].append(np.nan)
@@ -219,7 +219,7 @@ def calculate_ndcg_at_k(y_true, y_prob, k_values=[10, 50, 100, 200, 500]):
             # Calculate NDCG@K
             score = ndcg_score(y_true.reshape(1, -1), y_prob.reshape(1, -1), k=k)
             ndcg_at_k[f'ndcg@{k}'] = score
-        except:
+        except (ValueError, TypeError):
             ndcg_at_k[f'ndcg@{k}'] = 0.0
     
     return ndcg_at_k
