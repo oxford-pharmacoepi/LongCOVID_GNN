@@ -2,7 +2,8 @@
 """
 Publication-quality figures for the SEAL drug repurposing manuscript.
 
-Generates 6 figures covering the main experimental results:
+Generates 6 figures
+
     fig1  — Model tournament (SEAL vs Global GNNs vs Heuristics)
     fig2  — Edge-type ablation impact on Osteoporosis LOO
     fig3  — Node-feature ablation (DRNL sufficiency)
@@ -13,7 +14,6 @@ Generates 6 figures covering the main experimental results:
 Usage:
     uv run python scripts/create_paper_plots.py            # all figures
     uv run python scripts/create_paper_plots.py --figures 1 5   # specific
-    uv run python scripts/create_paper_plots.py --dark          # dark theme
     uv run python scripts/create_paper_plots.py --format svg    # SVG output
 
 Output:
@@ -39,7 +39,6 @@ import matplotlib.pyplot as plt                     # noqa: E402
 import matplotlib.patches as mpatches               # noqa: E402
 import matplotlib.patheffects as pe                  # noqa: E402
 import matplotlib.colors as mcolors                  # noqa: E402
-from matplotlib.collections import PatchCollection   # noqa: E402
 import numpy as np                                   # noqa: E402
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -49,117 +48,95 @@ import numpy as np                                   # noqa: E402
 OUT_DIR = Path("results/figures")
 
 # ------------------------------------------------------------------
-# Colour palettes
+# Colour palette — restrained, journal-appropriate
+# Inspired by Nature Reviews / Lancet colour schemes
 # ------------------------------------------------------------------
-PALETTE_LIGHT = {
-    "bg":          "#FFFFFF",
-    "card":        "#F8FAFC",
-    "text":        "#111827",
-    "text_sec":    "#6B7280",
-    "grid":        "#E5E7EB",
-    "spine":       "#D1D5DB",
-    # Model colours — vibrant yet professional
-    "seal":        "#2563EB",      # blue-600
-    "seal_grad":   "#7C3AED",      # violet-600 (gradient end)
-    "seal_light":  "#BFDBFE",      # blue-200
-    "gat":         "#DC2626",      # red-600
-    "gat_light":   "#FECACA",      # red-200
-    "sage":        "#7C3AED",      # violet-600
-    "heuristic":   "#059669",      # emerald-600
-    "neutral":     "#9CA3AF",      # grey-400
-    "accent":      "#F59E0B",      # amber-500
-    "success":     "#10B981",      # emerald-500
-    "danger":      "#EF4444",      # red-500
-    "bar_edge":    "#FFFFFF",
-    # Drug class colours (fig 5)
-    "antiviral":       "#2563EB",
-    "corticosteroid":  "#DC2626",
-    "anti_inflam":     "#F59E0B",
-    "immunotherapy":   "#7C3AED",
-    "antimalarial":    "#0891B2",
-    "antimicrobial":   "#059669",
-    "antibiotic":      "#78716C",
-    "hormone":         "#DB2777",
-    "other":           "#D1D5DB",
+PAL = {
+    # Core model colours
+    "seal":         "#1B65A6",   # strong, confident blue
+    "seal_light":   "#8FBCDB",   # muted blue for secondary
+    "gat":          "#D64550",   # muted crimson
+    "sage":         "#6A4C93",   # plum / violet
+    "heuristic":    "#2A9D8F",   # teal
+    "neutral":      "#AAAAAA",   # warm grey
+    "accent":       "#E9A820",   # warm amber
+    "alert":        "#C94040",   # darker red for warnings
+
+    # Drug class colours (fig 5) — distinguishable, accessible
+    "antiviral":       "#1B65A6",
+    "corticosteroid":  "#D64550",
+    "anti_inflam":     "#E9A820",
+    "immunotherapy":   "#6A4C93",
+    "antimalarial":    "#2A9D8F",
+    "antimicrobial":   "#3DA35D",
+    "antibiotic":      "#8D775F",
+    "hormone":         "#C45BAA",
+    "other":           "#BBBBBB",
+
+    # Gradient stops for ablation
+    "good":         "#1B65A6",
+    "ok":           "#E9A820",
+    "bad":          "#D64550",
 }
 
-PALETTE_DARK = {
-    "bg":          "#0F172A",
-    "card":        "#1E293B",
-    "text":        "#F1F5F9",
-    "text_sec":    "#94A3B8",
-    "grid":        "#334155",
-    "spine":       "#475569",
-    "seal":        "#60A5FA",
-    "seal_grad":   "#A78BFA",
-    "seal_light":  "#1E3A5F",
-    "gat":         "#F87171",
-    "gat_light":   "#7F1D1D",
-    "sage":        "#A78BFA",
-    "heuristic":   "#34D399",
-    "neutral":     "#9CA3AF",
-    "accent":      "#FBBF24",
-    "success":     "#34D399",
-    "danger":      "#F87171",
-    "bar_edge":    "#1E293B",
-    "antiviral":       "#60A5FA",
-    "corticosteroid":  "#F87171",
-    "anti_inflam":     "#FBBF24",
-    "immunotherapy":   "#A78BFA",
-    "antimalarial":    "#22D3EE",
-    "antimicrobial":   "#34D399",
-    "antibiotic":      "#A8A29E",
-    "hormone":         "#F472B6",
-    "other":           "#475569",
-}
-
-# Active palette — set by CLI flag
-P = PALETTE_LIGHT
+# Figure dimensions (inches) — standard single and double column
+SINGLE_COL = 3.5          # ~89 mm
+DOUBLE_COL = 7.2          # ~183 mm
+FULL_PAGE  = 9.5           # wider for presentation
 
 
 def apply_style() -> None:
-    """Apply a consistent, premium matplotlib style."""
+    """Apply a Nature/Lancet-inspired matplotlib RC style."""
     plt.rcParams.update({
-        # Typography
+        # Typography — Helvetica Neue is available on macOS
         "font.family":        "sans-serif",
-        "font.sans-serif":    ["Inter", "Helvetica Neue", "Arial",
+        "font.sans-serif":    ["Helvetica Neue", "Helvetica", "Arial",
                                "DejaVu Sans"],
-        "font.size":          11,
-        "axes.titlesize":     13,
+        "font.size":          8,
+        "axes.titlesize":     9,
         "axes.titleweight":   "bold",
-        "axes.titlepad":      14,
-        "axes.labelsize":     11,
+        "axes.titlepad":      10,
+        "axes.labelsize":     8,
         "axes.labelweight":   "medium",
-        "axes.labelpad":      8,
-        "xtick.labelsize":    9.5,
-        "ytick.labelsize":    9.5,
-        "legend.fontsize":    9,
-        "legend.framealpha":  0.92,
-        "legend.edgecolor":   P["grid"],
-        "legend.fancybox":    True,
+        "axes.labelpad":      6,
+        "xtick.labelsize":    7,
+        "ytick.labelsize":    7,
+        "legend.fontsize":    7,
+        "legend.framealpha":  1.0,
+        "legend.edgecolor":   "#CCCCCC",
+        "legend.fancybox":    False,
+        "legend.borderpad":   0.5,
         # Figure
-        "figure.facecolor":   P["bg"],
-        "axes.facecolor":     P["bg"],
+        "figure.facecolor":   "#FFFFFF",
+        "axes.facecolor":     "#FFFFFF",
         "figure.dpi":         300,
         "savefig.dpi":        300,
         "savefig.bbox":       "tight",
-        "savefig.pad_inches": 0.25,
-        "savefig.facecolor":  P["bg"],
+        "savefig.pad_inches": 0.15,
+        "savefig.facecolor":  "#FFFFFF",
         # Grid & spines
         "axes.spines.top":    False,
         "axes.spines.right":  False,
-        "axes.grid":          True,
-        "axes.grid.axis":     "y",
-        "grid.alpha":         0.35,
-        "grid.color":         P["grid"],
-        "grid.linewidth":     0.5,
-        "grid.linestyle":     "--",
+        "axes.grid":          False,          # off by default — added per-figure
+        "grid.alpha":         0.3,
+        "grid.color":         "#CCCCCC",
+        "grid.linewidth":     0.4,
+        "grid.linestyle":     "-",
+        # Spines
+        "axes.edgecolor":     "#444444",
+        "axes.linewidth":     0.6,
+        # Ticks
+        "xtick.major.width":  0.5,
+        "ytick.major.width":  0.5,
+        "xtick.major.size":   3,
+        "ytick.major.size":   3,
+        "xtick.direction":    "out",
+        "ytick.direction":    "out",
         # Colours
-        "text.color":         P["text"],
-        "axes.edgecolor":     P["spine"],
-        "axes.labelcolor":    P["text"],
-        "xtick.color":        P["text_sec"],
-        "ytick.color":        P["text_sec"],
+        "text.color":         "#222222",
+        "axes.labelcolor":    "#222222",
+        "xtick.color":        "#444444",
+        "ytick.color":        "#444444",
     })
 
 
@@ -172,65 +149,12 @@ def save(fig: plt.Figure, name: str, fmt: str = "png") -> None:
     print(f"  ✓ {name}")
 
 
-# ------------------------------------------------------------------
-# Shared helpers
-# ------------------------------------------------------------------
-
-def _shadow() -> list:
-    """Return subtle text shadow path effects."""
-    return [pe.withStroke(linewidth=3, foreground=P["bg"])]
-
-
-def _rounded_bar(ax, x, height, width=0.6, colour="#333",
-                 bottom=0, radius=0.08, **kwargs):
-    """Draw a single bar with rounded top corners."""
-    from matplotlib.patches import FancyBboxPatch
-    left = x - width / 2
-    rect = FancyBboxPatch(
-        (left, bottom), width, height,
-        boxstyle=f"round,pad=0,rounding_size={radius}",
-        facecolor=colour, edgecolor=P["bar_edge"],
-        linewidth=0.7, zorder=3, **kwargs,
-    )
-    ax.add_patch(rect)
-    return rect
-
-
-def _add_value_label(ax, x, y, text, colour=None, fontsize=9,
-                     va="bottom", offset=0):
-    """Add a styled value label above/below a bar."""
-    colour = colour or P["text"]
-    txt = ax.text(
-        x, y + offset, text,
-        ha="center", va=va, fontsize=fontsize,
-        fontweight="bold", color=colour,
-    )
-    txt.set_path_effects(_shadow())
-    return txt
-
-
-def _gradient_fill(ax, x, y_bottom, y_top, colour_bottom, colour_top,
-                   width=0.6, n_steps=50):
-    """Fill a vertical region with a smooth gradient."""
-    for i in range(n_steps):
-        frac = i / n_steps
-        y0 = y_bottom + frac * (y_top - y_bottom)
-        y1 = y_bottom + (frac + 1 / n_steps) * (y_top - y_bottom)
-        r = frac
-        c0 = mcolors.to_rgb(colour_bottom)
-        c1 = mcolors.to_rgb(colour_top)
-        c = tuple(c0[j] * (1 - r) + c1[j] * r for j in range(3))
-        ax.fill_between(
-            [x - width / 2, x + width / 2], y0, y1,
-            color=c, linewidth=0, zorder=2,
-        )
-
-
-def _subtitle(ax, text, y=-0.12, fontsize=9):
-    """Add a descriptive subtitle below the axis."""
-    ax.text(0.5, y, text, transform=ax.transAxes,
-            ha="center", fontsize=fontsize, color=P["text_sec"],
-            style="italic")
+def _panel_label(ax, label: str, x: float = -0.08, y: float = 1.08,
+                 fontsize: int = 11):
+    """Add a bold panel label (a, b, c, …) in the Nature style."""
+    ax.text(x, y, label, transform=ax.transAxes,
+            fontsize=fontsize, fontweight="bold", va="top", ha="right",
+            color="#111111")
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -244,7 +168,7 @@ def fig1_tournament(fmt: str = "png") -> None:
 
     Data: ALL_RESULTS_SUMMARY.md §1, FULL_TOURNAMENT_REPORT.md
     """
-    fig, ax = plt.subplots(figsize=(10, 5.5))
+    fig, ax = plt.subplots(figsize=(DOUBLE_COL, 3.8))
 
     diseases = [
         "Osteoporosis\n(27 drugs)",
@@ -257,15 +181,15 @@ def fig1_tournament(fmt: str = "png") -> None:
     aa     = [18.5,  8.5,  0.0]
 
     models = [
-        ("SEAL (SAGE+JK)", seal,  P["seal"]),
-        ("GAT (best global)", gat,   P["gat"]),
-        ("SAGE-3L", sage3, P["sage"]),
-        ("Adamic-Adar", aa, P["heuristic"]),
+        ("SEAL (SAGE+JK)", seal,  PAL["seal"]),
+        ("GAT (best global)", gat,   PAL["gat"]),
+        ("SAGE-3L", sage3, PAL["sage"]),
+        ("Adamic–Adar", aa, PAL["heuristic"]),
     ]
 
     x = np.arange(len(diseases))
     n = len(models)
-    w = 0.17
+    w = 0.18
     gap = 0.03
 
     for idx, (label, values, colour) in enumerate(models):
@@ -273,71 +197,67 @@ def fig1_tournament(fmt: str = "png") -> None:
         bars = ax.bar(
             x + offset, values, w,
             label=label, color=colour,
-            edgecolor="white", linewidth=0.7, zorder=3,
-            alpha=0.92,
+            edgecolor="white", linewidth=0.5, zorder=3,
         )
-        # Value labels
+        # Value labels — compact
         for bar in bars:
             h = bar.get_height()
             if h > 0:
-                _add_value_label(
-                    ax, bar.get_x() + bar.get_width() / 2,
-                    h, f"{h:.0f}%", fontsize=8, offset=1.2,
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2, h + 1.5,
+                    f"{h:.0f}", ha="center", va="bottom",
+                    fontsize=6, fontweight="bold", color="#333333",
                 )
 
     ax.set_ylabel("Hits@100 (%)")
-    ax.set_title("Model Tournament — Drug Recovery Rate (Hits@100)")
     ax.set_xticks(x)
-    ax.set_xticklabels(diseases, fontsize=10)
-    ax.set_ylim(0, 110)
+    ax.set_xticklabels(diseases, fontsize=8)
+    ax.set_ylim(0, 108)
+    ax.yaxis.grid(True, alpha=0.25, linewidth=0.4)
+    ax.set_axisbelow(True)
 
-    # Legend
-    ax.legend(
-        loc="upper right", frameon=True, fancybox=True,
-        edgecolor=P["grid"], framealpha=0.95,
+    # Legend — inside, upper right
+    leg = ax.legend(
+        loc="upper right", frameon=True,
+        edgecolor="#CCCCCC", framealpha=1.0,
+        handlelength=1.2, handletextpad=0.4,
+        borderpad=0.4, labelspacing=0.3,
     )
+    leg.get_frame().set_linewidth(0.5)
 
-    # Complexity gradient arrow
+    # Complexity annotation arrow below
     ax.annotate(
-        "", xy=(2.42, -8), xytext=(-0.42, -8),
+        "", xy=(2.38, -7), xytext=(-0.38, -7),
         xycoords="data", textcoords="data",
-        arrowprops=dict(
-            arrowstyle="-|>", color=P["text_sec"],
-            lw=1.2, mutation_scale=12,
-        ),
+        arrowprops=dict(arrowstyle="-|>", color="#888888",
+                        lw=0.8, mutation_scale=10),
         annotation_clip=False,
     )
     ax.text(
-        1.0, -13,
-        "← focused                  disease complexity                  broad →",
-        ha="center", fontsize=8, color=P["text_sec"],
+        1.0, -11.5,
+        "<-- focused                    disease complexity"
+        "                    broad -->",
+        ha="center", fontsize=6.5, color="#888888",
         transform=ax.get_xaxis_transform(),
     )
 
-    # Highlight winner per disease
-    for i, (s, g, sa, a) in enumerate(zip(seal, gat, sage3, aa)):
-        best = max(s, g, sa, a)
-        if best == s:
-            ax.plot(i - 1.5 * (w + gap), best + 5, "▾",
-                    color=P["seal"], markersize=6, zorder=5)
-
-    plt.tight_layout()
+    fig.subplots_adjust(left=0.09, right=0.97, top=0.95, bottom=0.16)
     save(fig, "fig1_tournament", fmt)
     plt.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Figure 2 — Edge-Type Ablation
+# Figure 2 — Edge-Type Ablation  (lollipop chart)
 # ═══════════════════════════════════════════════════════════════════════
 
 def fig2_edge_ablation(fmt: str = "png") -> None:
     """
-    Horizontal bar chart showing how removing each edge type affects
-    the median rank in Osteoporosis LOO validation.
+    Lollipop chart: each edge-type ablation → change in median rank.
+    Horizontal orientation with coloured stems.
 
     Data: ALL_RESULTS_SUMMARY.md §7.A
     """
-    fig, ax = plt.subplots(figsize=(9, 5))
+    fig, ax = plt.subplots(figsize=(DOUBLE_COL, 3.2))
 
     configs = [
         "Full graph (baseline)",
@@ -348,47 +268,49 @@ def fig2_edge_ablation(fmt: str = "png") -> None:
     ]
     med_ranks = [29, 31, 40, 334, 553]
 
-    # Gradient: good (teal) → bad (red)
-    norm = plt.Normalize(0, 553)
+    # Colour gradient: good → bad
+    norm = plt.Normalize(0, 600)
     cmap = mcolors.LinearSegmentedColormap.from_list(
-        "perf",
-        [P["seal"], P["seal_light"], P["accent"], P["danger"]],
+        "perf", [PAL["good"], PAL["ok"], PAL["bad"]]
     )
     colours = [cmap(norm(v)) for v in med_ranks]
 
-    bars = ax.barh(
-        range(len(configs)), med_ranks, color=colours,
-        edgecolor="white", linewidth=0.8, height=0.6, zorder=3,
-    )
+    y_pos = np.arange(len(configs))
 
-    ax.set_yticks(range(len(configs)))
-    ax.set_yticklabels(configs, fontsize=10)
-    ax.set_xlabel("Median Rank (lower = better)")
-    ax.set_title("Edge-Type Ablation — Osteoporosis LOO")
+    # Draw stems (horizontal lines from 0 to value)
+    for i, (v, c) in enumerate(zip(med_ranks, colours)):
+        ax.plot([0, v], [i, i], color=c, linewidth=1.8, zorder=2)
+        ax.scatter(v, i, color=c, s=60, zorder=4, edgecolors="white",
+                   linewidth=0.8)
+
+    # Baseline reference
+    ax.axvline(x=29, color=PAL["seal"], linestyle=":", alpha=0.4,
+               linewidth=0.8, zorder=1)
+
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(configs, fontsize=7.5)
+    ax.set_xlabel("Median rank (lower = better)")
     ax.invert_yaxis()
-    ax.set_xlim(0, 700)
+    ax.set_xlim(-10, 680)
 
     # Value labels
-    for i, (bar, v) in enumerate(zip(bars, med_ranks)):
-        c = P["danger"] if v > 100 else P["text"]
-        x_pos = v + 12
+    for i, v in enumerate(med_ranks):
         label = str(v)
-        if v > 100:
-            label += "  ▲ critical"
-        txt = ax.text(x_pos, i, label, va="center", fontsize=10,
-                      fontweight="bold", color=c)
-        txt.set_path_effects(_shadow())
+        bold = v > 100
+        if bold:
+            label += "  << critical"
+        ax.text(
+            v + 14, i, label, va="center", fontsize=7,
+            fontweight="bold" if bold else "medium",
+            color=PAL["alert"] if bold else "#333333",
+        )
 
-    # Reference line at baseline
-    ax.axvline(x=29, color=P["seal"], linestyle=":", alpha=0.4,
-               linewidth=1.2, zorder=1, label="Baseline (29)")
-
-    # Annotations
+    # Annotation
     ax.annotate(
         "Drug–gene & disease–gene edges\nare the core biological signal",
-        xy=(553, 4), xytext=(480, 2.5),
-        fontsize=8, color=P["text_sec"], ha="center",
-        arrowprops=dict(arrowstyle="->", color=P["text_sec"], lw=0.8),
+        xy=(553, 4), xytext=(420, 2.2),
+        fontsize=6.5, color="#666666", ha="center",
+        arrowprops=dict(arrowstyle="->", color="#999999", lw=0.6),
     )
 
     plt.tight_layout()
@@ -402,164 +324,156 @@ def fig2_edge_ablation(fmt: str = "png") -> None:
 
 def fig3_node_ablation(fmt: str = "png") -> None:
     """
-    Paired panels showing that DRNL-only SEAL matches or beats
-    the full-feature model on Hits@20 and Median Rank.
+    Paired panels: DRNL-only SEAL matches or beats full features.
 
     Data: ALL_RESULTS_SUMMARY.md §7.B
     """
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
+    fig, axes = plt.subplots(1, 2, figsize=(DOUBLE_COL, 3.0))
 
     labels = [
-        "DRNL + features\n+ types (49-dim)",
-        "DRNL + types\n(3-dim)",
-        "DRNL only\n(0-dim)",
+        "DRNL +\nfeatures +\ntypes (49d)",
+        "DRNL +\ntypes (3d)",
+        "DRNL only\n(0d)",
     ]
-    h20        = [40.7, 40.7, 44.4]
-    medrank    = [29,   24,   22]
+    h20      = [40.7, 40.7, 44.4]
+    medrank  = [29,   24,   22]
 
-    # Colour progression: more minimal = more vibrant
-    cols = [P["neutral"], P["seal_light"], P["seal"]]
-    edge_cols = ["#D1D5DB", "#93C5FD", "#2563EB"]
+    # Progressive colouring: minimal → more vivid
+    cols = [PAL["neutral"], PAL["seal_light"], PAL["seal"]]
 
-    # ─── Panel A: Hits@20 ────────────────────────────────────────
+    # ─── Panel a: Hits@20 ─────────────────────────────────────────
     ax = axes[0]
     bars_a = ax.bar(
-        range(3), h20, color=cols, edgecolor=edge_cols,
-        linewidth=1.5, width=0.55, zorder=3,
+        range(3), h20, color=cols,
+        edgecolor="white", linewidth=0.6, width=0.52, zorder=3,
     )
     for i, bar in enumerate(bars_a):
-        _add_value_label(
-            ax, bar.get_x() + bar.get_width() / 2,
-            bar.get_height(), f"{h20[i]:.1f}%",
-            fontsize=10, offset=0.8,
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 0.6,
+            f"{h20[i]:.1f}%",
+            ha="center", va="bottom", fontsize=7, fontweight="bold",
+            color="#333333",
         )
     ax.set_ylabel("Hits@20 (%)")
-    ax.set_title("a)  Drug Recovery Rate")
     ax.set_xticks(range(3))
-    ax.set_xticklabels(labels, fontsize=8.5)
-    ax.set_ylim(0, 56)
+    ax.set_xticklabels(labels, fontsize=6.5)
+    ax.set_ylim(0, 54)
+    ax.yaxis.grid(True, alpha=0.2, linewidth=0.4)
+    ax.set_axisbelow(True)
+    _panel_label(ax, "a")
 
-    # "Best" badge
+    # Highlight best
     ax.annotate(
-        "★ Best", xy=(2, 44.4), xytext=(2, 51),
-        ha="center", fontsize=8.5, fontweight="bold", color=P["seal"],
-        arrowprops=dict(arrowstyle="->", color=P["seal"], lw=1.2),
+        "Best", xy=(2, 44.4), xytext=(2, 50),
+        ha="center", fontsize=7, fontweight="bold", color=PAL["seal"],
+        arrowprops=dict(arrowstyle="->", color=PAL["seal"], lw=0.8),
     )
 
-    # ─── Panel B: Median Rank ────────────────────────────────────
+    # ─── Panel b: Median Rank ────────────────────────────────────
     ax = axes[1]
     bars_b = ax.bar(
-        range(3), medrank, color=cols, edgecolor=edge_cols,
-        linewidth=1.5, width=0.55, zorder=3,
+        range(3), medrank, color=cols,
+        edgecolor="white", linewidth=0.6, width=0.52, zorder=3,
     )
     for i, bar in enumerate(bars_b):
-        _add_value_label(
-            ax, bar.get_x() + bar.get_width() / 2,
-            bar.get_height(), str(medrank[i]),
-            fontsize=10, offset=0.5,
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 0.4,
+            str(medrank[i]),
+            ha="center", va="bottom", fontsize=7, fontweight="bold",
+            color="#333333",
         )
-    ax.set_ylabel("Median Rank (lower = better)")
-    ax.set_title("b)  Ranking Quality")
+    ax.set_ylabel("Median rank (lower = better)")
     ax.set_xticks(range(3))
-    ax.set_xticklabels(labels, fontsize=8.5)
-    ax.set_ylim(0, 38)
+    ax.set_xticklabels(labels, fontsize=6.5)
+    ax.set_ylim(0, 37)
+    ax.yaxis.grid(True, alpha=0.2, linewidth=0.4)
+    ax.set_axisbelow(True)
+    _panel_label(ax, "b")
 
     ax.annotate(
-        "★ Best", xy=(2, 22), xytext=(2, 28),
-        ha="center", fontsize=8.5, fontweight="bold", color=P["seal"],
-        arrowprops=dict(arrowstyle="->", color=P["seal"], lw=1.2),
+        "Best", xy=(2, 22), xytext=(2, 27.5),
+        ha="center", fontsize=7, fontweight="bold", color=PAL["seal"],
+        arrowprops=dict(arrowstyle="->", color=PAL["seal"], lw=0.8),
     )
 
-    fig.suptitle(
-        "Node Feature Ablation — DRNL Structural Labels Suffice",
-        fontsize=14, fontweight="bold", y=1.02,
-    )
-    plt.tight_layout()
+    fig.tight_layout(w_pad=1.5)
     save(fig, "fig3_node_ablation", fmt)
     plt.close()
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Figure 4 — Disease Complexity vs Performance
+# Figure 4 — Disease Complexity vs Performance (bubble chart)
 # ═══════════════════════════════════════════════════════════════════════
 
 def fig4_disease_complexity(fmt: str = "png") -> None:
     """
-    Bubble chart: n_true_drugs vs median_rank, bubble size = H@100%.
+    Bubble chart: n_true_drugs vs median_rank, bubble size ∝ Hits@100%.
 
     Data: ALL_RESULTS_SUMMARY.md §1, §8
     """
-    fig, ax = plt.subplots(figsize=(8, 5.5))
+    fig, ax = plt.subplots(figsize=(DOUBLE_COL, 4.0))
 
-    # (n_true_drugs, median_rank, name, hits_at_100_pct)
+    # (n_true_drugs, median_rank, label, hits@100%, offset_xy)
     data = [
-        (27,   24,   "Osteoporosis",          92.6),
-        (59,   130,  "Multiple\nSclerosis",   44.1),
-        (59,   206,  "Ank. Spondylitis\n(propagated)", 33.9),
-        (44,   809,  "Neuropathic\nPain",     None),
-        (56,   354,  "Type 2\nDiabetes",      None),
-        (108,  399,  "Depression",            15.1),
+        (27,   24,   "Osteoporosis",                 92.6,  (8, -18)),
+        (59,   130,  "Multiple Sclerosis",            44.1,  (8, 12)),
+        (59,   206,  "Ank. Spondylitis\n(propagated)", 33.9,  (8, 12)),
+        (44,   809,  "Neuropathic Pain",              None,  (8, -14)),
+        (56,   354,  "Type 2 Diabetes",               None,  (8, 10)),
+        (108,  399,  "Depression",                     15.1,  (8, -18)),
     ]
 
-    for n, mr, name, h100 in data:
-        size = h100 * 4 if h100 else 100
-        alpha = 0.82 if h100 else 0.45
+    for n, mr, name, h100, (dx, dy) in data:
+        size = h100 * 3.5 if h100 else 80
+        alpha = 0.80 if h100 else 0.40
         if h100 and h100 > 60:
-            colour = P["seal"]
+            colour = PAL["seal"]
         elif h100 and h100 > 30:
-            colour = P["accent"]
+            colour = PAL["accent"]
         elif h100:
-            colour = P["danger"]
+            colour = PAL["alert"]
         else:
-            colour = P["neutral"]
+            colour = PAL["neutral"]
 
         ax.scatter(
             n, mr, s=size, c=colour, alpha=alpha, zorder=5,
-            edgecolors="white", linewidth=2,
+            edgecolors="white", linewidth=1.5,
         )
-
-        # Smart label positioning
-        ha, va, dx, dy = "left", "bottom", 6, 18
-        if name.startswith("Osteo"):
-            dx, dy, va = 6, -30, "top"
-        elif name.startswith("Dep"):
-            dx, dy, va = 6, -30, "top"
-        elif name.startswith("Type"):
-            dx, dy = 6, 12
-        elif name.startswith("Neuro"):
-            dx, dy, ha = 6, -20, "left"
-            va = "top"
 
         ax.annotate(
             name, (n, mr), xytext=(dx, dy),
             textcoords="offset points",
-            fontsize=8.5, ha=ha, va=va,
-            color=P["text"], fontweight="medium",
+            fontsize=6.5, ha="left", va="center",
+            color="#333333",
             arrowprops=dict(
-                arrowstyle="-", color=P["grid"],
-                lw=0.6, connectionstyle="arc3,rad=0.1",
+                arrowstyle="-", color="#BBBBBB",
+                lw=0.5, connectionstyle="arc3,rad=0.1",
             ),
         )
 
-    ax.set_xlabel("Number of True Drugs for Disease")
-    ax.set_ylabel("SEAL Median Rank (lower = better)")
-    ax.set_title("Disease Complexity vs SEAL LOO Performance")
+    ax.set_xlabel("Number of true drugs for disease")
+    ax.set_ylabel("SEAL median rank (lower = better)")
     ax.set_xlim(15, 120)
-    ax.set_ylim(-60, 920)
+    ax.set_ylim(-40, 920)
+    ax.yaxis.grid(True, alpha=0.2, linewidth=0.4)
+    ax.set_axisbelow(True)
 
-    # Bubble size legend
+    # Size legend
     for sz, lab in [
-        (92 * 4, "H@100 ≈ 93%"),
-        (44 * 4, "H@100 ≈ 44%"),
-        (100,    "Not tested"),
+        (92 * 3.5, "H@100 ≈ 93%"),
+        (44 * 3.5, "H@100 ≈ 44%"),
+        (80,       "Not tested"),
     ]:
-        ax.scatter([], [], s=sz, c=P["neutral"], alpha=0.5, label=lab,
-                   edgecolors="white", linewidth=1.5)
-    ax.legend(
+        ax.scatter([], [], s=sz, c=PAL["neutral"], alpha=0.5, label=lab,
+                   edgecolors="white", linewidth=1)
+    leg = ax.legend(
         loc="upper right", title="Bubble size = H@100",
-        title_fontsize=8.5, frameon=True, fancybox=True,
-        edgecolor=P["grid"],
+        title_fontsize=7, frameon=True,
+        edgecolor="#CCCCCC", handletextpad=0.5,
     )
+    leg.get_frame().set_linewidth(0.5)
 
     plt.tight_layout()
     save(fig, "fig4_disease_complexity", fmt)
@@ -573,12 +487,12 @@ def fig4_disease_complexity(fmt: str = "png") -> None:
 def fig5_long_covid(fmt: str = "png") -> None:
     """
     Horizontal bar chart of the top 20 consensus drug predictions,
-    colour-coded by therapeutic class. Stars mark RCT drugs.
-    Seed consistency shown as text inside bars.
+    colour-coded by therapeutic class.  Stars mark RCT drugs.
+    Seed consistency shown inside bars.
 
     Data: ALL_RESULTS_SUMMARY.md §11
     """
-    fig, ax = plt.subplots(figsize=(10, 7.5))
+    fig, ax = plt.subplots(figsize=(DOUBLE_COL, 5.5))
 
     # (name, score, class_key, is_rct, seeds_str)
     drugs = [
@@ -610,45 +524,40 @@ def fig5_long_covid(fmt: str = "png") -> None:
     for d in drugs_rev:
         n = d[0]
         if d[3]:
-            n += "  ⭐"
+            n += "  *RCT*"
         names.append(n)
     scores  = [d[1] for d in drugs_rev]
-    colours = [P.get(d[2], P["other"]) for d in drugs_rev]
+    colours = [PAL.get(d[2], PAL["other"]) for d in drugs_rev]
     seeds   = [d[4] for d in drugs_rev]
 
     bars = ax.barh(
         range(20), scores, color=colours,
-        edgecolor="white", linewidth=0.7, height=0.72, zorder=3,
-        alpha=0.9,
+        edgecolor="white", linewidth=0.5, height=0.68, zorder=3,
+        alpha=0.88,
     )
 
     ax.set_yticks(range(20))
-    ax.set_yticklabels(names, fontsize=9.5)
-    ax.set_xlabel("Mean SEAL Score (5-seed consensus, ≥3/5 seeds)")
-    ax.set_title(
-        "Long COVID — Top 20 Predicted Drug Candidates",
-        pad=16,
-    )
-    ax.set_xlim(0, 0.78)
+    ax.set_yticklabels(names, fontsize=7)
+    ax.set_xlabel("Mean SEAL score (5-seed consensus, ≥3/5 seeds)")
+    ax.set_xlim(0, 0.76)
 
-    # Seed count & score inside/beside bars
+    # Seed count & score labels
     for i, (bar, sd, sc) in enumerate(zip(bars, seeds, scores)):
         w = bar.get_width()
-        # Seed count inside bar (right-aligned)
+        # Seed count inside bar
         ax.text(
-            w - 0.012, i, sd,
-            va="center", ha="right", fontsize=7.5,
-            color="white", fontweight="bold", alpha=0.9,
+            w - 0.008, i, sd,
+            va="center", ha="right", fontsize=5.5,
+            color="white", fontweight="bold", alpha=0.85,
         )
-        # Score to the right
-        txt = ax.text(
-            w + 0.008, i, f"{sc:.3f}",
-            va="center", ha="left", fontsize=8,
-            color=P["text_sec"], fontweight="medium",
+        # Score outside bar
+        ax.text(
+            w + 0.006, i, f"{sc:.3f}",
+            va="center", ha="left", fontsize=6,
+            color="#666666",
         )
-        txt.set_path_effects(_shadow())
 
-    # Legend by drug class (de-duplicated, in order)
+    # Legend — drug class
     class_labels = {
         "antiviral": "Antiviral", "corticosteroid": "Corticosteroid",
         "anti_inflam": "Anti-inflammatory", "immunotherapy": "Immunotherapy",
@@ -663,23 +572,25 @@ def fig5_long_covid(fmt: str = "png") -> None:
             seen.append(cls)
             handles.append(
                 mpatches.Patch(
-                    color=P.get(cls, P["other"]),
+                    facecolor=PAL.get(cls, PAL["other"]),
                     label=class_labels.get(cls, cls),
-                    alpha=0.9,
+                    alpha=0.88, edgecolor="white", linewidth=0.3,
                 )
             )
-    # Add RCT marker
+    # RCT marker
     handles.append(
         plt.Line2D([0], [0], marker="*", color="none",
-                   markerfacecolor=P["accent"], markersize=10,
+                   markerfacecolor=PAL["accent"], markersize=7,
                    label="RCT drug")
     )
-    ax.legend(
-        handles=handles, loc="lower right", fontsize=8,
-        frameon=True, fancybox=True,
-        title="Drug Class", title_fontsize=9,
-        edgecolor=P["grid"],
+
+    leg = ax.legend(
+        handles=handles, loc="lower right", fontsize=6.5,
+        frameon=True, title="Therapeutic class", title_fontsize=7,
+        edgecolor="#CCCCCC", handlelength=1.0, handletextpad=0.4,
+        borderpad=0.4, labelspacing=0.3, ncol=2,
     )
+    leg.get_frame().set_linewidth(0.5)
 
     plt.tight_layout()
     save(fig, "fig5_long_covid_predictions", fmt)
@@ -692,73 +603,76 @@ def fig5_long_covid(fmt: str = "png") -> None:
 
 def fig6_gene_config(fmt: str = "png") -> None:
     """
-    Paired bar chart comparing NARROW / BROAD / FULL gene configs on
+    Paired bar chart: NARROW / BROAD / FULL gene configs on
     (a) median RCT drug rank and (b) RCT drugs recovered in top 50.
 
     Data: ALL_RESULTS_SUMMARY.md §2
     """
-    fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
+    fig, axes = plt.subplots(1, 2, figsize=(DOUBLE_COL, 3.0))
 
-    labels = ["NARROW\n(8 genes)", "BROAD\n(39 genes)", "FULL\n(52 genes)"]
+    labels  = ["NARROW\n(8 genes)", "BROAD\n(39 genes)", "FULL\n(52 genes)"]
     med_rct = [236, 379, 474]
     top50   = [3.3, 2.0, 2.3]
 
-    cols       = [P["seal"], P["seal_light"], P["neutral"]]
-    edge_cols  = ["#2563EB", "#93C5FD", "#D1D5DB"]
+    cols = [PAL["seal"], PAL["seal_light"], PAL["neutral"]]
 
-    # ─── Panel A: Median RCT Rank ────────────────────────────────
+    # ─── Panel a: Median RCT Rank ───────────────────────────────
     ax = axes[0]
     bars = ax.bar(
-        range(3), med_rct, color=cols, edgecolor=edge_cols,
-        linewidth=1.5, width=0.5, zorder=3,
+        range(3), med_rct, color=cols,
+        edgecolor="white", linewidth=0.6, width=0.50, zorder=3,
     )
     for i, bar in enumerate(bars):
-        _add_value_label(
-            ax, bar.get_x() + bar.get_width() / 2,
-            bar.get_height(), str(med_rct[i]),
-            fontsize=10, offset=8,
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 8,
+            str(med_rct[i]),
+            ha="center", va="bottom", fontsize=7, fontweight="bold",
+            color="#333333",
         )
-    ax.set_ylabel("Median RCT Drug Rank (lower = better)")
-    ax.set_title("a)  Ranking Quality")
+    ax.set_ylabel("Median RCT drug rank\n(lower = better)")
     ax.set_xticks(range(3))
-    ax.set_xticklabels(labels, fontsize=9.5)
-    ax.set_ylim(0, 570)
+    ax.set_xticklabels(labels, fontsize=7)
+    ax.set_ylim(0, 560)
+    ax.yaxis.grid(True, alpha=0.2, linewidth=0.4)
+    ax.set_axisbelow(True)
+    _panel_label(ax, "a")
 
     ax.annotate(
-        "★ Best", xy=(0, 236), xytext=(0.6, 440),
-        ha="center", fontsize=9, fontweight="bold", color=P["seal"],
-        arrowprops=dict(arrowstyle="->", color=P["seal"], lw=1.2),
+        "Best", xy=(0, 236), xytext=(0.55, 420),
+        ha="center", fontsize=7, fontweight="bold", color=PAL["seal"],
+        arrowprops=dict(arrowstyle="->", color=PAL["seal"], lw=0.8),
     )
 
-    # ─── Panel B: RCT in Top 50 ─────────────────────────────────
+    # ─── Panel b: RCT in Top 50 ────────────────────────────────
     ax = axes[1]
     bars = ax.bar(
-        range(3), top50, color=cols, edgecolor=edge_cols,
-        linewidth=1.5, width=0.5, zorder=3,
+        range(3), top50, color=cols,
+        edgecolor="white", linewidth=0.6, width=0.50, zorder=3,
     )
     for i, bar in enumerate(bars):
-        _add_value_label(
-            ax, bar.get_x() + bar.get_width() / 2,
-            bar.get_height(), f"{top50[i]:.1f}",
-            fontsize=10, offset=0.06,
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + 0.05,
+            f"{top50[i]:.1f}",
+            ha="center", va="bottom", fontsize=7, fontweight="bold",
+            color="#333333",
         )
-    ax.set_ylabel("Mean RCT Drugs in Top 50")
-    ax.set_title("b)  Top-50 Recovery (avg 3 seeds)")
+    ax.set_ylabel("Mean RCT drugs in top 50")
     ax.set_xticks(range(3))
-    ax.set_xticklabels(labels, fontsize=9.5)
-    ax.set_ylim(0, 4.8)
+    ax.set_xticklabels(labels, fontsize=7)
+    ax.set_ylim(0, 4.5)
+    ax.yaxis.grid(True, alpha=0.2, linewidth=0.4)
+    ax.set_axisbelow(True)
+    _panel_label(ax, "b")
 
     ax.annotate(
-        "★ Best", xy=(0, 3.3), xytext=(0.6, 4.2),
-        ha="center", fontsize=9, fontweight="bold", color=P["seal"],
-        arrowprops=dict(arrowstyle="->", color=P["seal"], lw=1.2),
+        "Best", xy=(0, 3.3), xytext=(0.55, 4.0),
+        ha="center", fontsize=7, fontweight="bold", color=PAL["seal"],
+        arrowprops=dict(arrowstyle="->", color=PAL["seal"], lw=0.8),
     )
 
-    fig.suptitle(
-        "Gene Configuration — Fewer, More Specific Genes Perform Best",
-        fontsize=14, fontweight="bold", y=1.02,
-    )
-    plt.tight_layout()
+    fig.tight_layout(w_pad=1.5)
     save(fig, "fig6_gene_configs", fmt)
     plt.close()
 
@@ -792,16 +706,8 @@ def main():
         choices=["png", "svg", "pdf"],
         help="Primary output format (PDF always generated too)",
     )
-    parser.add_argument(
-        "--dark", action="store_true",
-        help="Use dark colour palette (for presentations)",
-    )
     args = parser.parse_args()
 
-    # Apply theme
-    global P
-    if args.dark:
-        P = PALETTE_DARK
     apply_style()
 
     print(f"Generating {len(args.figures)} figure(s) → {OUT_DIR}/")
