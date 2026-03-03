@@ -1,0 +1,21 @@
+# Failed RCTs for Negative Validation
+# Format: disease_id	drug_id	drug_name	trial_name	outcome
+# Outcome: 'no_benefit' = completed but ineffective, 'harmful' = safety concerns, 'withdrawn' = trial stopped early
+#
+# These drugs should ideally rank LOW in LOO predictions (true negatives).
+#
+# === COVID-19 (MONDO_0100096) ===
+# Expected FAILURES
+MONDO_0100096	CHEMBL1421	Hydroxychloroquine	RECOVERY	no_benefit
+MONDO_0100096	CHEMBL513	Ivermectin	ACTIV-6/TOGETHER	no_benefit
+MONDO_0100096	CHEMBL729	Lopinavir	RECOVERY	no_benefit
+MONDO_0100096	CHEMBL1545	Azithromycin	RECOVERY	no_benefit
+MONDO_0100096	CHEMBL1631	Colchicine	RECOVERY	no_benefit
+MONDO_0100096	CHEMBL1201580	Anakinra	REMAP-CAP	no_benefit
+MONDO_0100096	CHEMBL521686	Interferon beta-1a	SOLIDARITY	no_benefit
+MONDO_0100096	CHEMBL3137309	Ruxolitinib	RUXCOVID	no_benefit
+# Expected SUCCESSES (for comparison — should rank HIGH)
+# MONDO_0100096	CHEMBL595	Dexamethasone	RECOVERY	success
+# MONDO_0100096	CHEMBL2028663	Baricitinib	ACTT-2/COV-BARRIER	success
+# MONDO_0100096	CHEMBL413	Tocilizumab	REMAP-CAP/RECOVERY	success
+# MONDO_0100096	CHEMBL1201583	Remdesivir	ACTT-1	success
