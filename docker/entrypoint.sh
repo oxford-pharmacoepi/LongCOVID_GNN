@@ -15,6 +15,13 @@ case "$1" in
         echo "Running SEAL Leave-One-Out validation..."
         python scripts/seal/train_loo.py "$@"
         ;;
+    seal-sweep)
+        shift
+        SCRIPT="${1:-scripts/seal/sweep_osteo.sh}"
+        shift 2>/dev/null || true
+        echo "Running SEAL sweep: $SCRIPT"
+        bash "$SCRIPT" "$@"
+        ;;
     seal-lc)
         shift
         echo "Running SEAL Long COVID scoring..."
@@ -88,6 +95,7 @@ case "$1" in
         echo ""
         echo "Commands:"
         echo "  seal-loo         SEAL Leave-One-Out validation"
+        echo "  seal-sweep       SEAL hyperparameter sweep"
         echo "  seal-lc          SEAL Long COVID scoring"
         echo "  gnn-train        Train Global GNN models"
         echo "  gnn-test         Evaluate GNN models"
