@@ -1,16 +1,56 @@
-drug_id	drug_name	Primary Mechanism / Study Context
-CHEMBL4802135	Nirmatrelvir	Antiviral; studied in combination with Ritonavir (Paxlovid) for viral persistence.
-CHEMBL163	Ritonavir	PK enhancer for Nirmatrelvir; also studied for potential independent antiviral effects.
-CHEMBL902	Famotidine	H2 Blocker; studied in the STIMULATE-ICP trial (often paired with Loratadine).
-CHEMBL998	Loratadine	H1 Blocker; studied for Mast Cell Activation Syndrome (MCAS) symptoms.
-CHEMBL2105759	Baricitinib	JAK Inhibitor; studied in the REVERSE-LC trial for neuro/cardiopulmonary symptoms.
-CHEMBL1431	Metformin	Studied in the COVID-OUT and ACTIV-6 trials for prevention and symptom reduction.
-CHEMBL19019	Naltrexone	"Low-Dose Naltrexone" (LDN); studied for neuro-inflammation and fatigue.
-CHEMBL810	Rivaroxaban	Anti-clotting agent; investigated for treating "micro-clots" (STIMULATE-ICP).
-CHEMBL41	Colchicine	Anti-inflammatory; studied for chest pain/pericarditis symptoms in Long COVID.
-CHEMBL507	Fluvoxamine	SSRI with S1R agonist activity; studied for potential neuro-protective effects.
-CHEMBL64	Atorvastatin	Statin; studied (often with Maraviroc) for vascular inflammation and endothelial health.
-CHEMBL1567	Maraviroc	CCR5 Antagonist; studied for immune modulation and viral entry inhibition.
-CHEMBL4297157	Ensitrelvir	Newer 3CL protease inhibitor (Xocova); studied as an alternative to Paxlovid.
-CHEMBL1152	Ibudilast	PDE4 Inhibitor; studied for neuro-inflammation and "brain fog."
-CHEMBL4594243	Rintatolimod	TLR3 Agonist (Ampligen); studied for immune dysfunction and ME/CFS-like symptoms.
+# Drugs tested in Long COVID / Post-COVID / PASC Clinical Trials
+# Source: ClinicalTrials.gov (accessed March 2026)
+#
+# This file is used by predict_long_covid.py and aggregate_lc_results.py
+# to identify known RCT drugs in the prediction output.
+#
+# Note: Only drugs with ChEMBL identifiers that are queryable in our
+# knowledge graph are included. Vaccines and non-drug interventions excluded.
+
+drug_id	drug_name	Primary Mechanism / Study Context	NCT IDs
+
+# Antivirals
+CHEMBL4802135	Nirmatrelvir	3CL protease inhibitor (Paxlovid component); viral persistence	NCT05576662,NCT05668091
+CHEMBL163	Ritonavir	PK enhancer for Nirmatrelvir; also studied independently	NCT05576662,NCT05668091
+CHEMBL1196	Remdesivir	Nucleotide analogue; SARS-CoV-2 RNA polymerase inhibition	NCT05266794,NCT05543343
+CHEMBL1349	Valacyclovir	Antiviral prodrug; EBV reactivation in PASC	NCT06316843
+CHEMBL4297157	Ensitrelvir	3CL protease inhibitor (Xocova); alternative to Paxlovid	NCT05985525
+
+# Corticosteroids
+CHEMBL384467	Dexamethasone	Corticosteroid; RECOVERY trial (acute COVID); LC trials ongoing	NCT05195242
+CHEMBL131	Prednisolone	Corticosteroid; STIMULATE-ICP trial arm 	NCT05532904
+CHEMBL635	Prednisone	Corticosteroid; immunomodulation in PASC	NCT06597682
+CHEMBL650	Methylprednisolone	Corticosteroid; cognitive deficits and inflammation post-COVID	NCT05986422,NCT05648734
+
+# Anti-inflammatory / Immunomodulatory
+CHEMBL902	Famotidine	H2 blocker; STIMULATE-ICP trial (often paired with Loratadine)	NCT05532904
+CHEMBL998	Loratadine	H1 blocker; MCAS symptoms in Long COVID	NCT05532904
+CHEMBL41	Colchicine	Anti-inflammatory; chest pain/pericarditis in Long COVID	NCT04510233
+CHEMBL118	Celecoxib	COX-2 selective NSAID; inflammation in PASC (+ Valacyclovir)	NCT06316843
+
+# JAK inhibitors
+CHEMBL2105759	Baricitinib	JAK inhibitor; REVERSE-LC trial for neuro/cardiopulmonary symptoms	NCT05074420
+
+# Metabolic
+CHEMBL1431	Metformin	Biguanide; COVID-OUT and ACTIV-6 trials for prevention + symptom reduction	NCT04510194,NCT04801940
+
+# Neuropsychiatric
+CHEMBL19019	Naltrexone	Low-dose naltrexone (LDN); neuro-inflammation and fatigue	NCT05430152,NCT06313983
+CHEMBL507	Fluvoxamine	SSRI with S1R agonist activity; neuro-protective effects	NCT04668950
+CHEMBL629	Amitriptyline	Tricyclic antidepressant; pain, fatigue, sleep disturbance	NCT05765006
+CHEMBL502	Donepezil	Acetylcholinesterase inhibitor; brain fog	NCT05965739
+
+# Cardiovascular
+CHEMBL810	Rivaroxaban	Anti-clotting agent; micro-clots (STIMULATE-ICP)	NCT05532904
+CHEMBL64	Atorvastatin	Statin; vascular inflammation and endothelial health	NCT05508867
+
+# Antiparasitic (repurposed)
+CHEMBL742	Hydroxychloroquine	Antimalarial immunomodulator; multiple LC trials	NCT04510233,NCT04353336
+CHEMBL660	Amantadine	Dopaminergic antiviral; fatigue and cognitive symptoms	NCT05576662,NCT04797871
+
+# CCR5 Antagonist
+CHEMBL1567	Maraviroc	CCR5 antagonist; immune modulation and viral entry inhibition	NCT05508867
+
+# Other
+CHEMBL1152	Ibudilast	PDE4 inhibitor; neuro-inflammation and brain fog	NCT05808400
+CHEMBL1542	Azathioprine	Immunosuppressant; autoimmune LC presentations	NCT05765006
