@@ -509,18 +509,18 @@ def fig5_long_covid(fmt: str = "png") -> None:
         ("Ribavirin",          0.622, "antiviral",      False, "5/5"),
         ("Nivolumab",          0.573, "immunotherapy",   False, "5/5"),
         ("Amphotericin B",     0.541, "antimicrobial",   False, "4/5"),
-        ("Valacyclovir",       0.538, "antiviral",       False, "4/5"),
+        ("Valacyclovir",       0.538, "antiviral",       True,  "4/5"),
         ("Tafenoquine",        0.538, "antimalarial",    False, "3/5"),
         ("Spinosad",           0.529, "other",           False, "3/5"),
         ("Retired compound",   0.528, "other",           False, "3/5"),
         ("Triclabendazole",    0.514, "other",           False, "3/5"),
         ("Mefloquine",         0.512, "antimalarial",    False, "3/5"),
         ("Acyclovir",          0.512, "antiviral",       False, "5/5"),
-        ("Prednisone",         0.503, "corticosteroid",  False, "5/5"),
+        ("Prednisone",         0.503, "corticosteroid",  True,  "5/5"),
         ("Streptomycin",       0.503, "antibiotic",      False, "3/5"),
         ("Somatropin",         0.503, "hormone",         False, "5/5"),
         ("Amoxicillin",        0.493, "antibiotic",      False, "3/5"),
-        ("Methylprednisolone", 0.491, "corticosteroid",  False, "5/5"),
+        ("Methylprednisolone", 0.491, "corticosteroid",  True,  "5/5"),
         ("Tetracycline",       0.490, "antibiotic",      False, "3/5"),
         ("Rosuvastatin",       0.487, "anti_inflam",     False, "5/5"),
         ("Dexamethasone",      0.487, "corticosteroid",  True,  "4/5"),
@@ -530,15 +530,11 @@ def fig5_long_covid(fmt: str = "png") -> None:
 
     # Reverse for horizontal bar chart (top drug at top)
     drugs_rev = drugs[::-1]
-    names = []
-    for d in drugs_rev:
-        n = d[0]
-        if d[3]:
-            n += "  *RCT*"
-        names.append(n)
+    names = [d[0] for d in drugs_rev]  # Don't add *RCT* text
     scores  = [d[1] for d in drugs_rev]
     colours = [PAL.get(d[2], PAL["other"]) for d in drugs_rev]
     seeds   = [d[4] for d in drugs_rev]
+    is_rct  = [d[3] for d in drugs_rev]
 
     bars = ax.barh(
         range(20), scores, color=colours,
@@ -551,8 +547,8 @@ def fig5_long_covid(fmt: str = "png") -> None:
     ax.set_xlabel("Mean SEAL score (5-seed consensus, ≥3/5 seeds)")
     ax.set_xlim(0, 0.76)
 
-    # Seed count & score labels
-    for i, (bar, sd, sc) in enumerate(zip(bars, seeds, scores)):
+    # Seed count & score labels, plus RCT star markers
+    for i, (bar, sd, sc, rct) in enumerate(zip(bars, seeds, scores, is_rct)):
         w = bar.get_width()
         # Seed count inside bar
         ax.text(
@@ -566,6 +562,11 @@ def fig5_long_covid(fmt: str = "png") -> None:
             va="center", ha="left", fontsize=6,
             color="#666666",
         )
+        # Star marker for RCT drugs
+        if rct:
+            ax.plot(w + 0.045, i, marker="*", markersize=8,
+                    color=PAL["accent"], markeredgecolor="white",
+                    markeredgewidth=0.3, zorder=5)
 
     # Legend — drug class
     class_labels = {
@@ -591,7 +592,7 @@ def fig5_long_covid(fmt: str = "png") -> None:
     handles.append(
         plt.Line2D([0], [0], marker="*", color="none",
                    markerfacecolor=PAL["accent"], markersize=7,
-                   label="RCT drug")
+                   label="Clinical trial drug")
     )
 
     leg = ax.legend(
@@ -1056,13 +1057,31 @@ def fig10_score_distribution(fmt: str = "png") -> None:
                 linewidth=lw, alpha=alpha, zorder=6)
 
     # ── Mark RCT drugs with labels ───────────────────────────────────
+    # Position labels alternately left/right to avoid overlap
     rct_indices = [i for i, r in enumerate(is_rct_list) if r]
-    for idx in rct_indices:
+    label_positions = []  # (score, y_offset, side) for each RCT drug
+    
+    # Pre-compute positions: stagger heights and alternate sides
+    base_y = kde_all(x_grid).max() * 0.85  # Start high
+    y_step = kde_all(x_grid).max() * 0.18
+    
+    for i, idx in enumerate(rct_indices):
         sc = all_scores[idx]
+        # Alternate left/right
+        side = "right" if i % 2 == 0 else "left"
+        # Stagger heights
+        y_offset = base_y - (i % 4) * y_step
+        label_positions.append((idx, sc, y_offset, side))
+    
+    for idx, sc, y_offset, side in label_positions:
         name = names[idx]
         # Map ChEMBL IDs to readable names
         label_map = {
+            "CHEMBL1349": "Valacyclovir",
+            "CHEMBL635": "Prednisone",
+            "CHEMBL650": "Methylprednisolone",
             "CHEMBL384467": "Dexamethasone",
+            "CHEMBL742": "Hydroxychloroquine",
             "CHEMBL131": "Prednisolone",
             "CHEMBL19019": "Naltrexone",
         }
@@ -1072,14 +1091,25 @@ def fig10_score_distribution(fmt: str = "png") -> None:
 
         ax.axvline(x=sc, color=PAL["alert"], linestyle="--",
                    linewidth=1.0, alpha=0.6, zorder=4)
-        y_pos = kde_all(np.array([sc]))[0]
+        
+        # Position text on left or right of the line
+        if side == "right":
+            x_text = sc + 0.025
+            ha = "left"
+        else:
+            x_text = sc - 0.025
+            ha = "right"
+        
         ax.annotate(
-            f"{label}\n(rank {rank}, RCT)",
-            xy=(sc, y_pos), xytext=(sc + 0.035, y_pos + 0.3),
+            f"{label} ({rank})",
+            xy=(sc, y_offset * 0.7), xytext=(x_text, y_offset),
             fontsize=6, color=PAL["alert"], fontweight="bold",
+            ha=ha, va="center",
             arrowprops=dict(arrowstyle="->", color=PAL["alert"],
-                            lw=0.8, connectionstyle="arc3,rad=0.2"),
-            zorder=8,
+                            lw=0.6, connectionstyle="arc3,rad=0.15"),
+            zorder=10,
+            bbox=dict(boxstyle="round,pad=0.15", facecolor="white", 
+                      edgecolor="none", alpha=0.8),
         )
 
     ax.set_xlabel("Mean SEAL score (5-seed consensus)")
@@ -1096,7 +1126,7 @@ def fig10_score_distribution(fmt: str = "png") -> None:
         f"Mean = {all_scores.mean():.3f}\n"
         f"Median = {np.median(all_scores):.3f}\n"
         f"Range: {all_scores.min():.3f}–{all_scores.max():.3f}\n"
-        f"RCT drugs found: {rct_mask.sum()}/3",
+        f"Trial drugs found: {rct_mask.sum()}/26",
         transform=ax.transAxes, fontsize=6.5,
         ha="right", va="top",
         bbox=dict(boxstyle="round,pad=0.4", facecolor="#F5F5F5",
