@@ -1,6 +1,14 @@
 """
 Pytest configuration and shared fixtures for LongCOVID_GNN tests.
 """
+import warnings
+# Suppress torch_geometric deprecation warning for distributed module
+warnings.filterwarnings(
+    "ignore",
+    message=".*torch_geometric.distributed.*has been deprecated.*",
+    category=DeprecationWarning
+)
+
 import pytest
 import pandas as pd
 import pyarrow as pa

@@ -363,13 +363,6 @@ def fig3_node_ablation(fmt: str = "png") -> None:
     ax.set_axisbelow(True)
     _panel_label(ax, "a")
 
-    # Highlight best
-    ax.annotate(
-        "Best", xy=(2, 44.4), xytext=(2, 50),
-        ha="center", fontsize=7, fontweight="bold", color=PAL["seal"],
-        arrowprops=dict(arrowstyle="->", color=PAL["seal"], lw=0.8),
-    )
-
     # ─── Panel b: Median Rank ────────────────────────────────────
     ax = axes[1]
     bars_b = ax.bar(
@@ -391,12 +384,6 @@ def fig3_node_ablation(fmt: str = "png") -> None:
     ax.yaxis.grid(True, alpha=0.2, linewidth=0.4)
     ax.set_axisbelow(True)
     _panel_label(ax, "b")
-
-    ax.annotate(
-        "Best", xy=(2, 22), xytext=(2, 27.5),
-        ha="center", fontsize=7, fontweight="bold", color=PAL["seal"],
-        arrowprops=dict(arrowstyle="->", color=PAL["seal"], lw=0.8),
-    )
 
     fig.tight_layout(w_pad=1.5)
     save(fig, "fig3_node_ablation", fmt)
@@ -420,9 +407,9 @@ def fig4_disease_complexity(fmt: str = "png") -> None:
         (27,   24,   "Osteoporosis",                 92.6,  (8, -18)),
         (59,   130,  "Multiple Sclerosis",            44.1,  (8, 12)),
         (59,   206,  "Ank. Spondylitis\n(propagated)", 33.9,  (8, 12)),
-        (44,   809,  "Neuropathic Pain",              None,  (8, -14)),
-        (56,   354,  "Type 2 Diabetes",               None,  (8, 10)),
-        (108,  399,  "Depression",                     15.1,  (8, -18)),
+        (44,   809,  "Neuropathic Pain",              13.6,  (8, -14)),
+        (56,   354,  "Type 2 Diabetes",               16.1,  (8, 10)),
+        (108,  399,  "Depression",                    15.1,  (8, -18)),
     ]
 
     for n, mr, name, h100, (dx, dy) in data:
@@ -460,20 +447,43 @@ def fig4_disease_complexity(fmt: str = "png") -> None:
     ax.yaxis.grid(True, alpha=0.2, linewidth=0.4)
     ax.set_axisbelow(True)
 
-    # Size legend
+    # Size legend (upper right)
+    size_handles = []
     for sz, lab in [
         (92 * 3.5, "H@100 ≈ 93%"),
         (44 * 3.5, "H@100 ≈ 44%"),
         (80,       "Not tested"),
     ]:
-        ax.scatter([], [], s=sz, c=PAL["neutral"], alpha=0.5, label=lab,
-                   edgecolors="white", linewidth=1)
-    leg = ax.legend(
-        loc="upper right", title="Bubble size = H@100",
+        h = ax.scatter([], [], s=sz, c=PAL["neutral"], alpha=0.5,
+                       edgecolors="white", linewidth=1)
+        size_handles.append((h, lab))
+    
+    # Color legend (lower right)
+    color_handles = [
+        mpatches.Patch(color=PAL["seal"], alpha=0.8, label="H@100 > 60%"),
+        mpatches.Patch(color=PAL["accent"], alpha=0.8, label="H@100 30–60%"),
+        mpatches.Patch(color=PAL["alert"], alpha=0.8, label="H@100 < 30%"),
+        mpatches.Patch(color=PAL["neutral"], alpha=0.4, label="Not tested"),
+    ]
+    
+    # Combined legend
+    leg1 = ax.legend(
+        handles=[h for h, _ in size_handles],
+        labels=[lab for _, lab in size_handles],
+        loc="upper right", title="Bubble size",
         title_fontsize=7, frameon=True,
         edgecolor="#CCCCCC", handletextpad=0.5,
     )
-    leg.get_frame().set_linewidth(0.5)
+    leg1.get_frame().set_linewidth(0.5)
+    ax.add_artist(leg1)
+    
+    leg2 = ax.legend(
+        handles=color_handles,
+        loc="lower right", title="Performance tier",
+        title_fontsize=7, frameon=True,
+        edgecolor="#CCCCCC", handletextpad=0.5,
+    )
+    leg2.get_frame().set_linewidth(0.5)
 
     plt.tight_layout()
     save(fig, "fig4_disease_complexity", fmt)
@@ -608,8 +618,9 @@ def fig6_gene_config(fmt: str = "png") -> None:
 
     Data: ALL_RESULTS_SUMMARY.md §2
     """
-    fig, axes = plt.subplots(1, 2, figsize=(DOUBLE_COL, 3.0))
+    fig, axes = plt.subplots(1, 2, figsize=(DOUBLE_COL + 0.8, 4.2))  # Wider, taller
 
+    # Single-line labels, gene count in parentheses  
     labels  = ["NARROW\n(8 genes)", "BROAD\n(39 genes)", "FULL\n(52 genes)"]
     med_rct = [236, 379, 474]
     top50   = [3.3, 2.0, 2.3]
@@ -625,24 +636,18 @@ def fig6_gene_config(fmt: str = "png") -> None:
     for i, bar in enumerate(bars):
         ax.text(
             bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + 8,
+            bar.get_height() + 12,
             str(med_rct[i]),
-            ha="center", va="bottom", fontsize=7, fontweight="bold",
+            ha="center", va="bottom", fontsize=8, fontweight="bold",
             color="#333333",
         )
-    ax.set_ylabel("Median RCT drug rank\n(lower = better)")
+    ax.set_ylabel("Median RCT drug rank (lower = better)", fontsize=8)
     ax.set_xticks(range(3))
-    ax.set_xticklabels(labels, fontsize=7)
-    ax.set_ylim(0, 560)
+    ax.set_xticklabels(labels, fontsize=7.5, rotation=0)
+    ax.set_ylim(0, 580)
     ax.yaxis.grid(True, alpha=0.2, linewidth=0.4)
     ax.set_axisbelow(True)
     _panel_label(ax, "a")
-
-    ax.annotate(
-        "Best", xy=(0, 236), xytext=(0.55, 420),
-        ha="center", fontsize=7, fontweight="bold", color=PAL["seal"],
-        arrowprops=dict(arrowstyle="->", color=PAL["seal"], lw=0.8),
-    )
 
     # ─── Panel b: RCT in Top 50 ────────────────────────────────
     ax = axes[1]
@@ -653,26 +658,20 @@ def fig6_gene_config(fmt: str = "png") -> None:
     for i, bar in enumerate(bars):
         ax.text(
             bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + 0.05,
+            bar.get_height() + 0.08,
             f"{top50[i]:.1f}",
-            ha="center", va="bottom", fontsize=7, fontweight="bold",
+            ha="center", va="bottom", fontsize=8, fontweight="bold",
             color="#333333",
         )
-    ax.set_ylabel("Mean RCT drugs in top 50")
+    ax.set_ylabel("Mean RCT drugs in top 50", fontsize=8)
     ax.set_xticks(range(3))
-    ax.set_xticklabels(labels, fontsize=7)
+    ax.set_xticklabels(labels, fontsize=7.5, rotation=0)
     ax.set_ylim(0, 4.5)
     ax.yaxis.grid(True, alpha=0.2, linewidth=0.4)
     ax.set_axisbelow(True)
     _panel_label(ax, "b")
 
-    ax.annotate(
-        "Best", xy=(0, 3.3), xytext=(0.55, 4.0),
-        ha="center", fontsize=7, fontweight="bold", color=PAL["seal"],
-        arrowprops=dict(arrowstyle="->", color=PAL["seal"], lw=0.8),
-    )
-
-    fig.tight_layout(w_pad=1.5)
+    fig.tight_layout(w_pad=2.5, rect=[0, 0.05, 1, 1])  # Extra bottom margin for labels
     save(fig, "fig6_gene_configs", fmt)
     plt.close()
 
@@ -878,13 +877,6 @@ def fig8_training_curves(fmt: str = "png") -> None:
     ax.scatter([best_epoch], [val_aucs[best_epoch - 1]], s=80,
                color=PAL["alert"], zorder=5, edgecolors="white",
                linewidths=1.0, marker="*")
-    ax.annotate(
-        f"Best: {val_aucs[best_epoch - 1]:.4f}\n(epoch {best_epoch})",
-        xy=(best_epoch, val_aucs[best_epoch - 1]),
-        xytext=(best_epoch + 4, val_aucs[best_epoch - 1] + 0.006),
-        fontsize=6, color=PAL["alert"], fontweight="bold",
-        arrowprops=dict(arrowstyle="->", color=PAL["alert"], lw=0.8),
-    )
 
     # Early stopping region
     ax.axvspan(best_epoch, 40, alpha=0.04, color=PAL["alert"], zorder=1)
@@ -932,7 +924,7 @@ def fig9_rct_comparison(fmt: str = "png") -> None:
 
     Data: ALL_RESULTS_SUMMARY.md §4
     """
-    fig, ax = plt.subplots(figsize=(DOUBLE_COL, 3.8))
+    fig, ax = plt.subplots(figsize=(DOUBLE_COL, 4.2))  # Taller for spacing
 
     # (drug_name, rank, outcome)  — seed=42 results
     drugs = [
@@ -965,7 +957,7 @@ def fig9_rct_comparison(fmt: str = "png") -> None:
 
     ax.set_yticks(y_pos)
     ax.set_yticklabels(names, fontsize=7.5)
-    ax.set_xlabel("SEAL rank (out of 2,471 drugs, lower = better)")
+    ax.set_xlabel("SEAL rank (out of 2,471 drugs, lower = better)", labelpad=8)
     ax.invert_yaxis()
     ax.set_xlim(-50, 2350)
 
@@ -977,28 +969,12 @@ def fig9_rct_comparison(fmt: str = "png") -> None:
     ax.axvline(x=failed_med, color=PAL["alert"], linestyle=":",
                alpha=0.5, linewidth=1.0, zorder=1)
 
-    # Annotations
-    ax.annotate(
-        f"Success median: {success_med}",
-        xy=(success_med, 9.8), xytext=(success_med + 100, 10.5),
-        fontsize=6.5, color=PAL["seal"], fontweight="bold",
-        annotation_clip=False,
-    )
-    ax.annotate(
-        f"Failed median: {failed_med}",
-        xy=(failed_med, 9.8), xytext=(failed_med + 100, 11.2),
-        fontsize=6.5, color=PAL["alert"], fontweight="bold",
-        annotation_clip=False,
-    )
-
-    # Separation factor
+    # Annotations - positioned below x-axis with more space
     ax.text(
-        0.97, 0.05,
-        f"Separation: {failed_med / success_med:.1f}×",
-        transform=ax.transAxes, fontsize=8, fontweight="bold",
-        ha="right", va="bottom", color="#333333",
-        bbox=dict(boxstyle="round,pad=0.4", facecolor="#F5F5F5",
-                  edgecolor="#CCCCCC", linewidth=0.5),
+        0.02, -0.18,
+        f"Success median: {success_med}  |  Failed median: {failed_med}  |  Separation: {failed_med / success_med:.1f}×",
+        transform=ax.transAxes, fontsize=7, fontweight="bold",
+        ha="left", va="top", color="#333333",
     )
 
     # Value labels
@@ -1006,18 +982,18 @@ def fig9_rct_comparison(fmt: str = "png") -> None:
         ax.text(r + 30, i, str(r), va="center", fontsize=6.5,
                 color="#555555", fontweight="medium")
 
-    # Legend
+    # Legend - more prominent
     handles = [
-        mpatches.Patch(facecolor=PAL["seal"], label="Successful RCT"),
-        mpatches.Patch(facecolor=PAL["alert"], label="Failed RCT"),
+        mpatches.Patch(facecolor=PAL["seal"], edgecolor="white", label="Successful RCT (blue)"),
+        mpatches.Patch(facecolor=PAL["alert"], edgecolor="white", label="Failed RCT (red)"),
     ]
     leg = ax.legend(
-        handles=handles, loc="center right", fontsize=7,
+        handles=handles, loc="upper right", fontsize=7,
         frameon=True, edgecolor="#CCCCCC",
     )
     leg.get_frame().set_linewidth(0.5)
 
-    plt.tight_layout()
+    fig.subplots_adjust(bottom=0.22)  # More space for annotation below x-axis
     save(fig, "fig9_rct_comparison", fmt)
     plt.close()
 
@@ -1182,14 +1158,6 @@ def fig11_degree_distribution(fmt: str = "png") -> None:
     ax.set_ylim(1, 15000)
     ax.yaxis.grid(True, alpha=0.2, linewidth=0.4)
     ax.set_axisbelow(True)
-
-    # Annotation: hub exclusion threshold
-    ax.annotate(
-        "Hub genes excluded\nfrom SEAL (degree ≥ 1,000)",
-        xy=(6, 73), xytext=(4.5, 15),
-        fontsize=6.5, color=PAL["alert"],
-        arrowprops=dict(arrowstyle="->", color=PAL["alert"], lw=0.8),
-    )
 
     # Stats inset
     ax.text(

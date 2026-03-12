@@ -71,7 +71,7 @@ LongCOVID_GNN/
 ├── tests/                            # Test suite (data, graph, edge extraction)
 ├── processed_data/                   # Pre-processed Open Targets datasets
 ├── results/                          # Outputs (models, figures, evaluation)
-├── gwas_genes_long_covid.txt         # Long COVID GWAS gene list (65 genes, 8 categories)
+├── gwas_genes_long_covid.txt         # Long COVID GWAS gene list (57 genes, 8 categories)
 ├── run_pipeline.py                   # Full pipeline orchestrator
 └── pyproject.toml                    # Dependencies (uv)
 ```
