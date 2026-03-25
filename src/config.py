@@ -74,7 +74,7 @@ class Config:
         }
         
         # Model selection
-        self.model_choice = 'Transformer'  # Options: 'all', 'Transformer', 'GCN', 'SAGE', 'GATModel'
+        self.model_choice = 'Transformer'  # Options: 'all', 'Transformer', 'GCN', 'SAGE', 'GAT'
 
         # Model hyperparameters
         self.model_config = {
@@ -83,7 +83,7 @@ class Config:
             'out_channels': 32,       # Output dimension
             'num_layers': 1,          # Default to 1 layer for stability
             'dropout_rate': 0.5,
-            'heads': 4,               # For Transformer/GATModel
+            'heads': 4,               # For Transformer/GAT
             'concat': True,           # For Transformer/GAT
             'num_epochs': 200,
             'lr': 0.001,
@@ -93,6 +93,28 @@ class Config:
             'decoder_type': 'mlp_neighbor',
             'use_heuristics': True,
         }
+        
+        # ── Environment variable overrides ──────────────────────────
+        # Allows ablation scripts to override config via env vars.
+        # Format: GNN_OVERRIDE_<attr>=<value>  (flat attributes)
+        #         GNN_OVERRIDE_<attr>__<key>=<value>  (dict attributes)
+        # Examples:
+        #   GNN_OVERRIDE_loss_function=focal
+        #   GNN_OVERRIDE_model_config__hidden_channels=128
+        #   GNN_OVERRIDE_model_config__use_heuristics=false
+        for key, value in os.environ.items():
+            if not key.startswith('GNN_OVERRIDE_'):
+                continue
+            attr_path = key[len('GNN_OVERRIDE_'):]
+            # Parse value type
+            parsed = self._parse_env_value(value)
+            if '__' in attr_path:
+                attr, subkey = attr_path.split('__', 1)
+                if hasattr(self, attr) and isinstance(getattr(self, attr), dict):
+                    getattr(self, attr)[subkey] = parsed
+            else:
+                if hasattr(self, attr_path):
+                    setattr(self, attr_path, parsed)
         
         # Training settings
         self.seed = 42
@@ -130,6 +152,23 @@ class Config:
             'fp_threshold': 0.7,
             'fp_top_k': 10000
         }
+    
+    @staticmethod
+    def _parse_env_value(value):
+        """Parse an environment variable string to the appropriate Python type."""
+        if value.lower() in ('true', '1', 'yes'):
+            return True
+        if value.lower() in ('false', '0', 'no'):
+            return False
+        try:
+            return int(value)
+        except ValueError:
+            pass
+        try:
+            return float(value)
+        except ValueError:
+            pass
+        return value
     
     def _is_cuda_available(self):
         """Check if CUDA is available."""

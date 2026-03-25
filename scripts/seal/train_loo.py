@@ -617,7 +617,7 @@ def train_seal_leave_one_out(
 
         # ── Validation step ──
         val_auc = None
-        if val_loader and (epoch + 1) % 2 == 0:
+        if val_loader and (epoch + 1) % 1 == 0:
             model.eval()
             val_preds, val_labels_list = [], []
             with torch.no_grad():
@@ -635,9 +635,9 @@ def train_seal_leave_one_out(
                 best_model_state = copy.deepcopy(model.state_dict())
                 epochs_without_improvement = 0
             else:
-                epochs_without_improvement += 2  # checked every 2 epochs
+                epochs_without_improvement += 1  # checked every epoch
 
-        if (epoch + 1) % 5 == 0:
+        if (epoch + 1) % 1 == 0:
             status = f"  Epoch {epoch + 1}/{epochs}, Loss: {avg_loss:.4f}, LR: {current_lr:.6f}"
             if val_auc is not None:
                 status += f", Val AUC: {val_auc:.4f} (best: {best_val_auc:.4f})"
@@ -710,6 +710,13 @@ def train_seal_leave_one_out(
     n = len(true_drugs)
     total_drugs = len(all_drug_list)
 
+    # Bottom-K metrics: how many true drugs fall in the WORST K positions?
+    # (false negative analysis — lower is better)
+    bottom_10 = sum(1 for r in ranks if r > total_drugs - 10)
+    bottom_20 = sum(1 for r in ranks if r > total_drugs - 20)
+    bottom_50 = sum(1 for r in ranks if r > total_drugs - 50)
+    bottom_100 = sum(1 for r in ranks if r > total_drugs - 100)
+
     print(f"\nTop 20 Predictions:")
     print(f"{'Rank':<6} {'Drug ID':<20} {'Score':<10} {'True?'}")
     print("-" * 60)
@@ -742,6 +749,12 @@ def train_seal_leave_one_out(
     print(f"  Median Rank: {median_rank:.1f}")
     print(f"  Mean Rank: {mean_rank:.1f}")
     print(f"  MRR: {mrr:.4f}")
+    if n > 0:
+        print(f"  --- Bottom-K (false negatives, lower is better) ---")
+        print(f"  Bottom@10:  {bottom_10} / {n} ({bottom_10 / n * 100:.1f}%)")
+        print(f"  Bottom@20:  {bottom_20} / {n} ({bottom_20 / n * 100:.1f}%)")
+        print(f"  Bottom@50:  {bottom_50} / {n} ({bottom_50 / n * 100:.1f}%)")
+        print(f"  Bottom@100: {bottom_100} / {n} ({bottom_100 / n * 100:.1f}%)")
     print(f"{'=' * 60}\n")
 
     # ── 8b. Failed RCT analysis (if file provided) ──────────────────────
@@ -845,6 +858,8 @@ def train_seal_leave_one_out(
             "best_val_auc": round(best_val_auc, 4) if val_edges else None,
             "hits_at_10": hits_at_10, "hits_at_20": hits_at_20,
             "hits_at_50": hits_at_50, "hits_at_100": hits_at_100,
+            "bottom_10": bottom_10, "bottom_20": bottom_20,
+            "bottom_50": bottom_50, "bottom_100": bottom_100,
             "total_true": n, "total_drugs": total_drugs,
             "median_rank": round(median_rank, 1),
             "mean_rank": round(mean_rank, 1),
@@ -859,6 +874,16 @@ def train_seal_leave_one_out(
     with open(json_path, "w") as f:
         json.dump(results_json, f, indent=2)
     print(f"Results saved to: {json_path}")
+
+    # ── 9b. Full drug ranking CSV ────────────────────────────────────────
+    csv_path = results_dir / f"seal_{target_disease}_{timestamp}_rankings.csv"
+    with open(csv_path, "w") as f:
+        f.write("rank,drug_idx,drug_id,score,is_true\n")
+        for rank, (drug_idx, score) in enumerate(drug_scores, 1):
+            drug_id = idx_to_drug.get(drug_idx, f"idx_{drug_idx}")
+            is_true = drug_idx in true_drugs
+            f.write(f"{rank},{drug_idx},{drug_id},{score:.6f},{is_true}\n")
+    print(f"Full rankings CSV: {csv_path}")
 
     # ── MLflow: log final results ───────────────────────────────────────
     if tracker:
