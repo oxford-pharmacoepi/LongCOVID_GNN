@@ -68,7 +68,7 @@ LongCOVID_GNN/
 │   ├── Dockerfile                    # Container configuration (CUDA 12.1, Python 3.12)
 │   └── entrypoint.sh                 # Container entry point
 │
-├── tests/                            # Test suite (data, graph, edge extraction)
+├── tests/                            # Unit tests (387 tests, 81% coverage)
 ├── processed_data/                   # Pre-processed Open Targets datasets
 ├── results/                          # Outputs (models, figures, evaluation)
 ├── gwas_genes_long_covid.txt         # Long COVID GWAS gene list (57 genes, 8 categories)
@@ -193,11 +193,37 @@ All settings are in `src/config.py`. Key parameters:
 | `negative_sampling_strategy` | `'mixed'` | Sampling strategy |
 | `train_neg_ratio` | 3 | Negatives per positive |
 
+## Testing
+
+The project includes a comprehensive test suite with **387 unit tests** covering **81% of the codebase**.
+
+```bash
+# Run full test suite
+uv run python -m pytest tests/ -q
+
+# Run with coverage report
+uv run python -m pytest tests/ --cov=src --cov-report=term-missing
+```
+
+Key module coverage:
+
+| Module | Coverage |
+|:---|---:|
+| `models.py` | 96% |
+| `eval_utils.py` | 94% |
+| `losses.py` | 89% |
+| `config.py` | 88% |
+| `negative_sampling.py` | 88% |
+| `training/optimiser.py` | 82% |
+
+Tests cover model architectures, evaluation metrics, loss functions, configuration, negative sampling strategies, data loading, edge/node feature extraction, graph construction, and MLflow tracking.
+
 ## MLflow Experiment Tracking
 
 ```bash
 uv run mlflow ui
 # Navigate to http://localhost:5000
+```
 
 ## License
 

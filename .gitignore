@@ -252,3 +252,21 @@ secrets.json
 data/KGBench*
 report/
 LONG_COVID_EXPLANATION.md
+
+# LaTeX build artifacts (docs/)
+docs/*.aux
+docs/*.out
+docs/*.toc
+docs/*.pdf
+docs/*.log
+
+# Working drafts and analysis reports
+docs/DRAFT_MANUSCRIPT.md
+docs/TODO_IMPROVEMENTS.md
+docs/OA_analysis_report.*
+
+# Root-level stale LaTeX artifacts
+tables_and_figures.*
+
+# Old filename (renamed to summarise)
+scripts/seal/summarize_lc_sensitivity.py

@@ -116,7 +116,7 @@ for i in "${!DISEASES[@]}"; do
 
     run_experiment "GNN-GAT ${dname}" \
         $PYTHON scripts/leave_one_out_validation.py \
-        --target-node "$disease" --model GATModel --epochs 200 --no-mlflow
+        --target-node "$disease" --model GAT --epochs 200 --no-mlflow
 
     # --- B. Decoder comparison (SAGE, best arch from Round 1) ---
     run_experiment "GNN-SAGE-dot ${dname}" \
