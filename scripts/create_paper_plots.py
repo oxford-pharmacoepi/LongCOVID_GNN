@@ -525,7 +525,7 @@ def fig5_long_covid(fmt: str = "png") -> None:
         ("Rosuvastatin",       0.487, "anti_inflam",     False, "5/5"),
         ("Dexamethasone",      0.487, "corticosteroid",  True,  "4/5"),
         ("Sarilumab",          0.485, "anti_inflam",     False, "4/5"),
-        ("Doxycycline",        0.485, "anti_inflam",     False, "5/5"),
+        ("Doxycycline",        0.485, "antibiotic",      False, "5/5"),
     ]
 
     # Reverse for horizontal bar chart (top drug at top)
@@ -623,8 +623,8 @@ def fig6_gene_config(fmt: str = "png") -> None:
 
     # Single-line labels, gene count in parentheses  
     labels  = ["NARROW\n(8 genes)", "BROAD\n(39 genes)", "FULL\n(52 genes)"]
-    med_rct = [236, 379, 474]
-    top50   = [3.3, 2.0, 2.3]
+    med_rct = [271, 300, 473]
+    top50   = [7, 2, 1]
 
     cols = [PAL["seal"], PAL["seal_light"], PAL["neutral"]]
 
@@ -642,15 +642,15 @@ def fig6_gene_config(fmt: str = "png") -> None:
             ha="center", va="bottom", fontsize=8, fontweight="bold",
             color="#333333",
         )
-    ax.set_ylabel("Median RCT drug rank (lower = better)", fontsize=8)
+    ax.set_ylabel("Median trial drug rank (lower = better)", fontsize=8)
     ax.set_xticks(range(3))
     ax.set_xticklabels(labels, fontsize=7.5, rotation=0)
-    ax.set_ylim(0, 580)
+    ax.set_ylim(0, 560)
     ax.yaxis.grid(True, alpha=0.2, linewidth=0.4)
     ax.set_axisbelow(True)
     _panel_label(ax, "a")
 
-    # ─── Panel b: RCT in Top 50 ────────────────────────────────
+    # ─── Panel b: Trial drugs in Top 50 ────────────────────────────────
     ax = axes[1]
     bars = ax.bar(
         range(3), top50, color=cols,
@@ -660,14 +660,14 @@ def fig6_gene_config(fmt: str = "png") -> None:
         ax.text(
             bar.get_x() + bar.get_width() / 2,
             bar.get_height() + 0.08,
-            f"{top50[i]:.1f}",
+            f"{top50[i]}/26",
             ha="center", va="bottom", fontsize=8, fontweight="bold",
             color="#333333",
         )
-    ax.set_ylabel("Mean RCT drugs in top 50", fontsize=8)
+    ax.set_ylabel("Trial drugs in top 50 (seed=123)", fontsize=8)
     ax.set_xticks(range(3))
     ax.set_xticklabels(labels, fontsize=7.5, rotation=0)
-    ax.set_ylim(0, 4.5)
+    ax.set_ylim(0, 8.5)
     ax.yaxis.grid(True, alpha=0.2, linewidth=0.4)
     ax.set_axisbelow(True)
     _panel_label(ax, "b")
@@ -1443,11 +1443,151 @@ def fig12_seal_subgraph(fmt: str = "png") -> None:
 
 
 # ═══════════════════════════════════════════════════════════════════════
+# Graphical Abstract
+# ═══════════════════════════════════════════════════════════════════════
+
+def fig_graphical_abstract(fmt: str = "png") -> None:
+    """
+    Graphical abstract: pipeline overview + top drug candidates + validation.
+    Three-panel horizontal layout:
+      (A) Pipeline schematic  (B) Top-20 therapeutic signals  (C) Validation
+    """
+    apply_style()
+    fig = plt.figure(figsize=(FULL_PAGE, 4.8))
+    gs = fig.add_gridspec(1, 3, width_ratios=[1.1, 1.4, 1.0], wspace=0.08,
+                          left=0.04, right=0.97, top=0.88, bottom=0.10)
+
+    # ─── Panel A: Pipeline schematic ────────────────────────────────────
+    ax_a = fig.add_subplot(gs[0])
+    ax_a.set_xlim(0, 1); ax_a.set_ylim(0, 1)
+    ax_a.axis("off")
+
+    box_style = dict(boxstyle="round,pad=0.3", fc="#EEF4FB", ec="#1B65A6", lw=1.2)
+    arrow_kw  = dict(arrowprops=dict(arrowstyle="->", color="#555555", lw=1.0),
+                     fontsize=0, ha="center", va="center")
+
+    boxes = [
+        (0.5, 0.90, "OpenTargets KG\n31,902 nodes · 1M+ edges", "#EEF4FB", "#1B65A6"),
+        (0.5, 0.67, "GWAS gene bridges\n(Long COVID seeds)", "#FFF8EC", "#E9A820"),
+        (0.5, 0.45, "SEAL subgraph model\n(SAGEConv + JK, 5 seeds)", "#EEF4FB", "#1B65A6"),
+        (0.5, 0.22, "≥3/5 consensus filter\n96 candidate drugs", "#EAF6ED", "#3DA35D"),
+    ]
+    for (x, y, txt, fc, ec) in boxes:
+        ax_a.text(x, y, txt, ha="center", va="center", fontsize=7,
+                  bbox=dict(boxstyle="round,pad=0.35", fc=fc, ec=ec, lw=1.2),
+                  transform=ax_a.transAxes, multialignment="center")
+
+    for y_from, y_to in [(0.84, 0.74), (0.61, 0.52), (0.39, 0.29)]:
+        ax_a.annotate("", xy=(0.5, y_to), xytext=(0.5, y_from),
+                      xycoords="axes fraction", textcoords="axes fraction",
+                      arrowprops=dict(arrowstyle="->", color="#555555", lw=1.0))
+
+    ax_a.set_title("(A)  Pipeline", fontsize=8.5, fontweight="bold",
+                   loc="left", pad=6)
+
+    # ─── Panel B: Top drug candidates by class ───────────────────────────
+    ax_b = fig.add_subplot(gs[1])
+    ax_b.axis("off")
+
+    drug_data = [
+        # (rank, name, class_label, class_color, is_trial)
+        (1,  "Ribavirin",         "Antiviral",         PAL["antiviral"],      False),
+        (2,  "Nivolumab",         "Immunotherapy",     PAL["immunotherapy"],  False),
+        (3,  "Amphotericin B",    "Antimicrobial",     PAL["antimicrobial"],  False),
+        (4,  "Valacyclovir*",     "Antiviral",         PAL["antiviral"],      True),
+        (5,  "Tafenoquine",       "Antimalarial",      PAL["antimalarial"],   False),
+        (10, "Acyclovir",         "Antiviral",         PAL["antiviral"],      False),
+        (11, "Prednisone*",       "Corticosteroid",    PAL["corticosteroid"], True),
+        (15, "Methylprednisolone*","Corticosteroid",    PAL["corticosteroid"], True),
+        (17, "Rosuvastatin",      "Anti-inflam.",      PAL["anti_inflam"],    False),
+        (18, "Dexamethasone*",    "Corticosteroid",    PAL["corticosteroid"], True),
+        (19, "Sarilumab",         "Anti-IL-6",         PAL["anti_inflam"],    False),
+        (20, "Doxycycline",       "Antibiotic",        PAL["antibiotic"],     False),
+    ]
+
+    col_x   = [0.04, 0.62, 0.88]
+    headers = ["Rank  Drug", "Class", ""]
+    y_start = 0.92
+    row_h   = 0.070
+
+    # header
+    for hx, htxt in zip(col_x, headers):
+        ax_b.text(hx, y_start + 0.01, htxt, fontsize=7, fontweight="bold",
+                  va="bottom", transform=ax_b.transAxes, color="#333333")
+    ax_b.plot([0.01, 0.99], [y_start - 0.01, y_start - 0.01],
+              color="#CCCCCC", lw=0.7, transform=ax_b.transAxes)
+
+    for i, (rank, name, cls, color, is_trial) in enumerate(drug_data):
+        y = y_start - (i + 1) * row_h
+        # colored dot
+        ax_b.plot(col_x[0] - 0.01, y + 0.02, "o", color=color, ms=6,
+                  transform=ax_b.transAxes, zorder=3)
+        # rank + name
+        weight = "bold" if is_trial else "normal"
+        ax_b.text(col_x[0] + 0.04, y + 0.03, f"{rank:2d}.  {name}",
+                  fontsize=6.8, va="center", transform=ax_b.transAxes,
+                  color="#111111", fontweight=weight)
+        # class
+        ax_b.text(col_x[1], y + 0.03, cls,
+                  fontsize=6.5, va="center", transform=ax_b.transAxes,
+                  color="#555555")
+
+    ax_b.text(0.02, 0.04, "* = drug with registered Long COVID clinical trial",
+              fontsize=6.0, transform=ax_b.transAxes, color="#888888", style="italic")
+    ax_b.set_title("(B)  Top Consensus Drug Candidates", fontsize=8.5,
+                   fontweight="bold", loc="left", pad=6)
+    ax_b.set_xlim(0, 1); ax_b.set_ylim(0, 1)
+
+    # ─── Panel C: Validation summary ────────────────────────────────────
+    ax_c = fig.add_subplot(gs[2])
+    ax_c.axis("off")
+    ax_c.set_xlim(0, 1); ax_c.set_ylim(0, 1)
+
+    val_items = [
+        ("Val AUC",          "0.988 ± 0.002",   "#1B65A6"),
+        ("Trial drugs\nin top 20",  "4 / 26",   "#D64550"),
+        ("Trial drugs\nin top 100", "7 / 26",   "#E9A820"),
+        ("SEAL–GAT\ntop-50 overlap", "25 drugs","#2A9D8F"),
+        ("Genes used\n(NARROW)",     "8 / 52",  "#6A4C93"),
+    ]
+
+    box_w, box_h = 0.42, 0.145
+    positions = [(0.05, 0.76), (0.53, 0.76),
+                 (0.05, 0.52), (0.53, 0.52),
+                 (0.29, 0.28)]
+
+    for (bx, by), (label, value, color) in zip(positions, val_items):
+        rect = plt.Rectangle((bx, by), box_w, box_h,
+                              fc=color + "22", ec=color, lw=1.2,
+                              transform=ax_c.transAxes, clip_on=False)
+        ax_c.add_patch(rect)
+        ax_c.text(bx + box_w / 2, by + box_h * 0.67, value,
+                  ha="center", va="center", fontsize=10, fontweight="bold",
+                  color=color, transform=ax_c.transAxes)
+        ax_c.text(bx + box_w / 2, by + box_h * 0.22, label,
+                  ha="center", va="center", fontsize=6.2,
+                  color="#444444", transform=ax_c.transAxes,
+                  multialignment="center")
+
+    ax_c.set_title("(C)  Key Results", fontsize=8.5, fontweight="bold",
+                   loc="left", pad=6)
+
+    fig.suptitle(
+        "SEAL-based Drug Repurposing for Long COVID  ·  Knowledge Graph Link Prediction",
+        fontsize=9, fontweight="bold", y=0.97, color="#222222",
+    )
+
+    save(fig, "graphical_abstract", fmt)
+    plt.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════
 # CLI entry point
 # ═══════════════════════════════════════════════════════════════════════
 
 ALL_FIGURES = {
     1:  ("fig1_tournament",            fig1_tournament),
+    0:  ("graphical_abstract",         fig_graphical_abstract),
     2:  ("fig2_edge_ablation",         fig2_edge_ablation),
     3:  ("fig3_node_ablation",         fig3_node_ablation),
     4:  ("fig4_disease_complexity",    fig4_disease_complexity),
