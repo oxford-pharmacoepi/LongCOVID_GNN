@@ -19,6 +19,7 @@ import os
 from pathlib import Path
 from tqdm import tqdm
 import glob
+import sys
 
 # Import from shared modules
 from src.models import GCNModel, TransformerModel, SAGEModel, GATModel, MODEL_CLASSES, LinkPredictor
@@ -608,6 +609,7 @@ class ModelTrainer:
                 'GCN': 'GCNModel',
                 'Transformer': 'TransformerModel',
                 'SAGE': 'SAGEModel',
+                'GAT': 'GATModel',
                 'GCNModel': 'GCNModel',
                 'TransformerModel': 'TransformerModel',
                 'SAGEModel': 'SAGEModel',
@@ -804,7 +806,7 @@ def main():
     parser = argparse.ArgumentParser(description='Train GNN models for drug-disease prediction')
     parser.add_argument('--graph', type=str, help='Path to graph file (.pt) - auto-detects latest if not provided')
     parser.add_argument('--model', type=str, default='all', 
-                       choices=['GCN', 'Transformer', 'SAGE', 'all'],
+                       choices=['GCN', 'Transformer', 'SAGE', 'GAT', 'all'],
                        help='Model architecture to train')
     parser.add_argument('--epochs', type=int, help='Number of training epochs (overrides config)')
     parser.add_argument('--output-dir', type=str, default='results/', help='Output directory')
