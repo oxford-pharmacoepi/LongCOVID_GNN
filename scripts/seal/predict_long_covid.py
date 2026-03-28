@@ -38,7 +38,7 @@ sys.path.insert(0, str(SEAL_DIR))
 from train_loo import sample_negatives_mixed, sample_negatives_random
 
 
-# Category labels used in gwas_genes_long_covid.txt
+# Category labels used in legacy gwas_genes_long_covid.txt format
 _CATEGORY_MAP = {
     "GWAS Lead Signals": "gwas",
     "Combinatorial OR": "combinatorial_or",
@@ -51,8 +51,11 @@ _CATEGORY_MAP = {
 }
 
 # Valid category names for --gene-categories
-ALL_CATEGORIES = {"gwas", "combinatorial_or", "cat1", "cat2", "cat3",
-                  "causal", "combinatorial", "own"}
+# Supports both legacy categories and new tabular groups.
+ALL_CATEGORIES = {
+    "gwas", "combinatorial_or", "cat1", "cat2", "cat3", "causal", "combinatorial", "own",
+    "core", "broader", "full",
+}
 
 
 def _header_to_category(header: str) -> str:
@@ -63,22 +66,44 @@ def _header_to_category(header: str) -> str:
     return "other"
 
 
-def load_gwas_genes(path: str = "gwas_genes_long_covid.txt") -> list[tuple[str, str]]:
-    """Read GWAS gene ENSG IDs from file, returning (gene_id, category) tuples."""
+def load_gwas_genes(path: str = "gwas_genes_long_covid.txt") -> list[tuple[str, str, str]]:
+    """Read gene file returning tuples: (ensembl_id, category, symbol)."""
     genes = []
     current_category = "other"
+    detected_tabular = False
+
     with open(path) as f:
-        for line in f:
-            line = line.strip()
+        for raw_line in f:
+            line = raw_line.strip()
             if not line:
                 continue
-            if line.startswith("# ==="):
-                current_category = _header_to_category(line)
-                continue
             if line.startswith("#"):
+                if line.startswith("# ==="):
+                    current_category = _header_to_category(line)
                 continue
-            gene_id = line.split()[0]  # handle inline comments
-            genes.append((gene_id, current_category))
+
+            lower = line.lower()
+            if lower.startswith("gene_id") and "group" in lower:
+                detected_tabular = True
+                continue
+
+            parts = line.split()
+            if detected_tabular and len(parts) >= 3:
+                symbol = parts[0]
+                ensembl_id = parts[1]
+                category = parts[2].strip().lower()
+                genes.append((ensembl_id, category, symbol))
+                continue
+
+            gene_id = parts[0]
+            symbol = gene_id
+            if "#" in raw_line:
+                try:
+                    symbol = raw_line.split("#", 1)[1].split("|", 1)[0].strip()
+                except Exception:
+                    symbol = gene_id
+            genes.append((gene_id, current_category, symbol))
+
     return genes
 
 
@@ -104,9 +129,10 @@ def main():
                         help="Exclude GWAS genes with more than N drug connections "
                              "(prevents hub genes from dominating). None = no cap.")
     parser.add_argument("--gene-categories", type=str, default="all",
-                        help="Comma-separated gene categories to include, or 'all'. "
-                             "Categories: gwas, own, cat1, cat2, cat3, causal, "
-                             "combinatorial, combinatorial_or")
+                        help="Comma-separated gene categories/groups to include, or 'all'. "
+                            "Supported: core, broader, full, own (new format) and "
+                            "gwas, own, cat1, cat2, cat3, causal, combinatorial, "
+                            "combinatorial_or (legacy)")
     args = parser.parse_args()
 
     torch.manual_seed(args.seed)
@@ -141,7 +167,7 @@ def main():
 
     # --- 2. Wire up GWAS genes (with optional filtering) ---
     gwas_genes_raw = load_gwas_genes(args.gwas_file)
-    print(f"\nLoaded {len(gwas_genes_raw)} GWAS genes from {args.gwas_file}")
+    print(f"\nLoaded {len(gwas_genes_raw)} genes from {args.gwas_file}")
 
     # Category filter
     if args.gene_categories.lower() == "all":
@@ -153,7 +179,7 @@ def main():
             print(f"  WARNING: Unknown categories ignored: {unknown}")
             allowed_cats -= unknown
     before = len(gwas_genes_raw)
-    gwas_genes_raw = [(g, c) for g, c in gwas_genes_raw if c in allowed_cats]
+    gwas_genes_raw = [(g, c, s) for g, c, s in gwas_genes_raw if c in allowed_cats]
     print(f"  Gene categories {sorted(allowed_cats)}: {before} → {len(gwas_genes_raw)} genes")
 
     # Build adjacency for hub-gene detection (if cap is active)
@@ -172,7 +198,7 @@ def main():
     missing_genes = []
     excluded_hub_genes = []
 
-    for gene_id, category in gwas_genes_raw:
+    for gene_id, category, symbol in gwas_genes_raw:
         gene_idx = gene_mapping.get(gene_id)
         if gene_idx is None:
             missing_genes.append(gene_id)
@@ -183,12 +209,12 @@ def main():
         if args.max_drug_per_gene is not None:
             drug_connections = len(adj_early.get(gene_idx, set()) & drug_idx_set_early)
             if drug_connections > args.max_drug_per_gene:
-                excluded_hub_genes.append((gene_id, category, drug_connections))
+                excluded_hub_genes.append((gene_id, category, symbol, drug_connections))
                 continue
 
         new_edges.append([lc_idx, gene_idx])
         new_edges.append([gene_idx, lc_idx])
-        connected_genes.append((gene_id, category))
+        connected_genes.append((gene_id, category, symbol))
 
     if new_edges:
         new_edge_tensor = torch.tensor(new_edges, dtype=torch.long).t()
@@ -198,9 +224,7 @@ def main():
             print(f"  {len(missing_genes)} genes not in graph: {missing_genes[:5]}")
         if excluded_hub_genes:
             print(f"  Excluded {len(excluded_hub_genes)} hub genes (>{args.max_drug_per_gene} drug connections):")
-            for gid, cat, dc in excluded_hub_genes:
-                comment = [l for l in open(args.gwas_file) if gid in l]
-                sym = comment[0].split('#')[1].split('|')[0].strip() if comment else gid
+            for gid, cat, sym, dc in excluded_hub_genes:
                 print(f"    {sym} ({gid}): {dc} drug connections [{cat}]")
     else:
         print("  WARNING: No GWAS genes found in graph!")
