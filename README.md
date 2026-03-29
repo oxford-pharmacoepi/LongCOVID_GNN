@@ -247,7 +247,7 @@ See [License.md](License.md) for details.
 - [Open Targets Platform](https://www.opentargets.org/) — Biomedical knowledge graph data
 - [PyTorch Geometric](https://pyg.org/) — GNN framework
 - [PyKEEN](https://pykeen.readthedocs.io/) — Knowledge graph embedding baselines
-- [KGBench](https://github.com/AstraZeneca/kgbench) — Data curation and model basis for this project
+- [KGBench](https://github.com/cmbi/Benchmark_GNN_OpenTargets) — Data curation and model basis for this project
 
 ## Contact
 
