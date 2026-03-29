@@ -1,14 +1,15 @@
 # Long COVID Drug Repurposing with Graph Neural Networks
 
-Drug repurposing framework combining **SEAL** (Subgraph Extraction and Link Prediction) and **Global GNN** architectures for drug–disease link prediction on biomedical knowledge graphs. Special focus on Long COVID treatment discovery using Open Targets data.
+Drug repurposing framework combining **SEAL** (Subgraph Extraction and Link Prediction), **Global GNN** architectures, and multiple baselines for drug–disease link prediction on biomedical knowledge graphs. Special focus on Long COVID treatment discovery using Open Targets data.
 
 ## Overview
 
-This project systematically evaluates SEAL against global GNN architectures (GAT, GraphSAGE, Transformer) and heuristic baselines (Common Neighbours, Jaccard, Adamic-Adar) for drug repurposing, using leave-one-out validation, temporal validation, and ablation studies.
+This project systematically evaluates SEAL against global GNN architectures (GAT, GraphSAGE, Transformer), Neural Common Neighbour (NCN), knowledge graph embeddings (TransE, DistMult, RotatE via PyKEEN), and heuristic baselines (Common Neighbours, Jaccard, Adamic-Adar) for drug repurposing, using leave-one-out validation, temporal validation, and ablation studies.
 
 **Key Capabilities:**
 - **SEAL model** with SAGEConv+JK for local subgraph-based link prediction
 - **Global GNNs**: GAT, GraphSAGE, GCN, Transformer (8 architecture variants)
+- **Baselines**: NCN/NCNC, KGE (TransE, DistMult, RotatE), heuristic scores
 - Temporal validation using time-stamped Open Targets releases (2021, 2023, 2024)
 - Leave-one-out (LOO) validation across multiple diseases
 - Multi-seed consensus predictions (5 seeds) for Long COVID
@@ -16,14 +17,6 @@ This project systematically evaluates SEAL against global GNN architectures (GAT
 - Bayesian hyperparameter optimisation with Optuna
 - Experiment tracking with MLflow
 - Dockerised for reproducible deployment on GCP
-
-## Key Results
-
-- **SEAL** excels for focused diseases (Osteoporosis: Hits@50 = 78%, median rank 24/2,471)
-- **GAT** outperforms SEAL for broadly-treated diseases (Depression: Hits@100 = 34% vs 16%)
-- Graph topology (drug–gene–disease pathway) is more predictive than node features or PPI
-- Temporal validation: future drug–disease links placed in top 13% on average
-- Long COVID: 96 consensus drug candidates from 5-seed ensemble
 
 ## Project Structure
 
@@ -48,7 +41,6 @@ LongCOVID_GNN/
 │   ├── 4_explain_predictions.py      # GNNExplainer predictions
 │   ├── 5_optimise_hyperparameters.py # Bayesian hyperparameter optimisation
 │   ├── 6_long_covid_repurposing.py   # Global GNN Long COVID predictions
-│   ├── create_paper_plots.py         # Publication figure generation
 │   ├── heuristic_baselines.py        # Heuristic baseline evaluation
 │   ├── leave_one_out_validation.py   # Global GNN LOO validation
 │   ├── tournament.sh                 # Full model tournament runner
@@ -61,6 +53,10 @@ LongCOVID_GNN/
 │   │   ├── score_long_covid.py       # RCT drug scoring
 │   │   └── visualise.py              # SEAL result visualisation
 │   ├── benchmarks/                   # Cross-model benchmarking scripts
+│   │   ├── gnn_vs_heuristics.py      # GNN vs heuristic comparison
+│   │   ├── ncnc_loo.py               # NCN/NCNC LOO evaluation
+│   │   ├── ncn_predict_long_covid.py # NCN Long COVID predictions
+│   │   └── pykeen_baselines.py       # KGE baselines (TransE, DistMult, RotatE)
 │   ├── tools/                        # Utility scripts (enrichment, embeddings)
 │   └── setup/                        # Data download and folder creation
 │
@@ -69,6 +65,7 @@ LongCOVID_GNN/
 │   └── entrypoint.sh                 # Container entry point
 │
 ├── tests/                            # Unit tests (409 tests, 81% coverage)
+├── docs/                             #  Supplementary material
 ├── processed_data/                   # Pre-processed Open Targets datasets
 ├── results/                          # Outputs (models, figures, evaluation)
 ├── gwas_genes_long_covid.txt         # Long COVID GWAS gene list (57 genes, 8 categories)
@@ -153,22 +150,40 @@ uv run python scripts/3_test_evaluate.py
 uv run python scripts/6_long_covid_repurposing.py --top-k 100 --lookup-names
 ```
 
+### Baselines
+
+```bash
+# Heuristic baselines (CN, Jaccard, Adamic-Adar)
+uv run python scripts/heuristic_baselines.py
+
+# KGE baselines (TransE, DistMult, RotatE)
+uv run python scripts/benchmarks/pykeen_baselines.py
+
+# NCN/NCNC evaluation
+uv run python scripts/benchmarks/ncnc_loo.py
+```
+
 ## Model Architectures
 
 ### SEAL
 - Subgraph extraction with Double-Radius Node Labelling (DRNL)
 - SAGEConv with Jumping Knowledge (JK) aggregation
 - Mean + max graph pooling for subgraph classification
-- Best for: Focused diseases with specific drug–gene pathways
 
 ### GAT (Graph Attention Network)
 - Multi-head attention over node neighbourhoods
-- Strongest Global GNN in the tournament
-- Best for: Broadly-treated diseases with diverse pharmacology
+- Strongest Global GNN in the model tournament
 
 ### GraphSAGE / GCN / Transformer
 - Additional Global GNN variants evaluated in the model tournament
-- See `results/FULL_TOURNAMENT_REPORT.md` for complete comparison
+
+### NCN (Neural Common Neighbour)
+- Learns representations of common neighbours for link prediction
+- Both NCN and NCNC (with completion) variants
+
+### KGE Baselines
+- TransE, DistMult, RotatE via [PyKEEN](https://pykeen.readthedocs.io/)
+- Trained and evaluated using the same edge splits as SEAL
 
 ## Temporal Validation
 
@@ -177,8 +192,6 @@ Three Open Targets versions ensure models generalise to future discoveries:
 1. **Training (21.06):** 9,425 drug–disease associations
 2. **Validation (23.06):** 336 associations for hyperparameter tuning
 3. **Test (24.06):** 83 associations across 56 diseases for final evaluation
-
-SEAL achieves test AUC = 0.915 and places future links in the top 13% of drugs on average.
 
 ## Configuration
 
@@ -233,6 +246,8 @@ See [License.md](License.md) for details.
 
 - [Open Targets Platform](https://www.opentargets.org/) — Biomedical knowledge graph data
 - [PyTorch Geometric](https://pyg.org/) — GNN framework
+- [PyKEEN](https://pykeen.readthedocs.io/) — Knowledge graph embedding baselines
+- [KGBench](https://github.com/AstraZeneca/kgbench) — Data curation and model basis for this project
 
 ## Contact
 

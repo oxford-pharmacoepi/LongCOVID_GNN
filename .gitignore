@@ -270,3 +270,6 @@ tables_and_figures.*
 
 # Old filename (renamed to summarise)
 scripts/seal/summarize_lc_sensitivity.py
+
+# Publication plot script (not needed for public repo)
+scripts/create_paper_plots.py
